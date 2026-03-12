@@ -22,10 +22,22 @@ def detect_clusters(db):
         if c == -1:
             continue
 
+        centroid = coords[clustering.labels_ == c].mean(axis=0)
+
         db.execute(text("""
-            INSERT INTO infrastructure_alerts
-            (issue_type,cluster_size)
-            VALUES ('ComplaintCluster',3)
-        """))
+        INSERT INTO infrastructure_alerts
+        (issue_type,cluster_size,location)
+
+        VALUES
+        (
+        'ComplaintCluster',
+        :size,
+        ST_SetSRID(ST_MakePoint(:lng,:lat),4326)
+        )
+        """),{
+        "size":len(cluster_points),
+        "lng":centroid[0],
+        "lat":centroid[1]
+        })
 
     db.commit()

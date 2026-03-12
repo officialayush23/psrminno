@@ -1,8 +1,10 @@
 # backend/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routes import complaints,task,analytics,ws,dashboard
+from routes import complaints,task,analytics,ws,dashboard,assistant
 from db import Base, engine
+from routes import surveys
+
 
 # Ensure tables are created (though you already ran the raw SQL, this is good practice)
 Base.metadata.create_all(bind=engine)
@@ -28,6 +30,9 @@ app.include_router(complaints.router)
 app.include_router(task.router)
 app.include_router(dashboard.router)
 app.include_router(analytics.router)
+app.include_router(surveys.router)
+
+app.include_router(assistant.router)
 @app.get("/")
 def root():
     return {"status": "online", "message": "PSCRM Core Nervous System Active"}

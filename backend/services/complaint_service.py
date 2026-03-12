@@ -52,27 +52,6 @@ def create_workflow_event(
     db.add(event)
 
 
-def create_notification(
-    db: Session,
-    user_id,
-    message: str,
-    notification_type: str = "info",
-    metadata: dict = None
-):
-    """
-    Stores notifications for citizen/admin dashboards.
-    """
-
-    notification = Notification(
-        user_id=user_id,
-        message=message,
-        notification_type=notification_type,
-        metadata=metadata
-    )
-
-    db.add(notification)
-
-
 def create_complaint(
     db: Session,
     user_id,
@@ -90,6 +69,8 @@ def create_complaint(
 
     # Detect zone
     zone_id = detect_zone(db, lat, lng)
+    
+    
 
     complaint = Complaint(
         user_id=user_id,

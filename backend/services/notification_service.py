@@ -18,7 +18,7 @@ def create_notification(
         user_id=user_id,
         message=message,
         notification_type=notification_type,
-        meta=meta
+        meta_data=meta
     )
 
     db.add(notification)

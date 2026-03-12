@@ -23,7 +23,7 @@ def create_notification(db: Session, user_id, message, notification_type="task_u
         user_id=user_id,
         message=message,
         notification_type=notification_type,
-        meta=meta
+        meta_data=meta
     )
     db.add(notification)
 
@@ -154,6 +154,15 @@ def update_task_status(db: Session, task_id: int, new_status: str, employee_id=N
     if new_status == "COMPLETED":
 
         complaint.status = "SURVEY_PENDING"
+
+        create_notification(
+            db,
+            complaint.user_id,
+            "Repair completed. Please submit feedback.",
+            "survey_request",
+            {"complaint_id": complaint.id}
+        )
+
         task.completed_at = datetime.utcnow()
 
         contractor = db.query(Contractor).filter(
@@ -178,8 +187,11 @@ def update_task_status(db: Session, task_id: int, new_status: str, employee_id=N
         "TaskService",
         {"status": new_status}
     )
-
+    
+  
     db.commit()
+    
+    
     
     asyncio.create_task(
 
