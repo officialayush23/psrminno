@@ -1,4 +1,6 @@
 # backend/routes/task.py
+from pydoc import text
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from db import get_db
@@ -37,3 +39,30 @@ def update_status(
     )
 
     return {"task_id": task.id, "status": task.status}
+
+
+
+@router.get("/my")
+
+def my_tasks(
+    db: Session = Depends(get_db),
+    user: TokenData = Depends(get_current_user)
+):
+
+    tasks = db.execute(
+        text("""
+        SELECT id,status,complaint_id
+        FROM tasks
+        WHERE employee_id=:uid
+        """),
+        {"uid": str(user.user_id)}
+    ).fetchall()
+
+    return [
+        {
+            "task_id": t[0],
+            "status": t[1],
+            "complaint_id": t[2]
+        }
+        for t in tasks
+    ]
