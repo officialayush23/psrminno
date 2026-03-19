@@ -4,22 +4,23 @@ import asyncio
 from services.realtime_service import broadcast_event
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from models import Task, Complaint, Contractor, WorkflowEvent, Notification
+from models import Task, Complaint, Contractor, DomainEvent, NotificationLog
 from datetime import datetime
 
 
-def log_event(db: Session, complaint_id: int, event_type: str, agent: str, payload=None):
-    event = WorkflowEvent(
-        complaint_id=complaint_id,
+def log_event(db: Session, complaint_id, event_type, agent, payload=None):
+    event = DomainEvent(
         event_type=event_type,
-        agent_name=agent,
-        payload=payload
+        entity_type="complaint",
+        entity_id=complaint_id,
+        actor_type=agent,
+        payload=payload or {}
     )
     db.add(event)
 
 
 def create_notification(db: Session, user_id, message, notification_type="task_update", meta=None):
-    notification = Notification(
+    notification = NotificationLog(
         user_id=user_id,
         message=message,
         notification_type=notification_type,

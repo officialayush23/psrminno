@@ -1,12 +1,12 @@
 # backend/services/survey_service.py
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from models import Feedback, Complaint, Contractor, Task, WorkflowEvent
+from models import SurveyResponse, Complaint, Contractor, Task, DomainEvent 
 
 
 def submit_feedback(db: Session, complaint_id: int, rating: int, comment: str):
 
-    feedback = Feedback(
+    feedback = SurveyResponse(
         complaint_id=complaint_id,
         rating=rating,
         comment=comment
@@ -48,7 +48,7 @@ def submit_feedback(db: Session, complaint_id: int, rating: int, comment: str):
         if result:
             contractor.rating = float(result[0])
 
-    event = WorkflowEvent(
+    event = DomainEvent(
         complaint_id=complaint_id,
         event_type="SURVEY_SUBMITTED",
         agent_name="SurveyService",
