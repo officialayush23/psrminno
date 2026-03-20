@@ -1,9 +1,21 @@
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-export default function TopBar({ title = "Dashboard" }) {
+export default function TopBar({ title = "Dashboard", unreadCount = 0 }) {
   const navigate = useNavigate();
   const stored = localStorage.getItem("auth_user");
   const user = stored ? JSON.parse(stored) : null;
+  const [searchVal, setSearchVal] = useState("");
+
+  const initials = user?.full_name
+    ? user.full_name.split(" ").map((n) => n[0]).join("").toUpperCase().slice(0, 2)
+    : "U";
+
+  function handleSearch(e) {
+    if (e.key === "Enter" && searchVal.trim()) {
+      navigate(`/my-complaints?q=${encodeURIComponent(searchVal.trim())}`);
+    }
+  }
 
   return (
     <header className="flex items-center justify-between px-8 h-[60px] sticky top-0 z-40 bg-white/80 backdrop-blur-md shadow-sm">
@@ -16,8 +28,11 @@ export default function TopBar({ title = "Dashboard" }) {
             search
           </span>
           <input
-            className="pl-10 pr-4 py-1.5 w-[320px] bg-surface-container-low border-none rounded-full text-sm focus:ring-2 focus:ring-primary/20 transition-all"
-            placeholder="Search ticket ID or area..."
+            value={searchVal}
+            onChange={(e) => setSearchVal(e.target.value)}
+            onKeyDown={handleSearch}
+            className="pl-10 pr-4 py-1.5 w-[280px] bg-surface-container-low border border-outline-variant/50 rounded-full text-sm focus:ring-2 focus:ring-primary/20 focus:outline-none transition-all"
+            placeholder="Search complaints (Enter)…"
             type="text"
           />
         </div>
@@ -29,24 +44,19 @@ export default function TopBar({ title = "Dashboard" }) {
             className="relative p-2 text-on-surface-variant hover:bg-surface-container-low rounded-full transition-colors"
           >
             <span className="material-symbols-outlined">notifications</span>
-            <span className="absolute top-1 right-1 w-4 h-4 bg-error text-[10px] text-white flex items-center justify-center rounded-full font-bold">
-              3
-            </span>
+            {unreadCount > 0 && (
+              <span className="absolute top-1 right-1 w-4 h-4 bg-error text-[10px] text-white flex items-center justify-center rounded-full font-bold">
+                {unreadCount > 9 ? "9+" : unreadCount}
+              </span>
+            )}
           </button>
 
           {/* Avatar */}
           <button
             onClick={() => navigate("/profile")}
-            className="w-8 h-8 rounded-full bg-surface-container-high flex items-center justify-center overflow-hidden border border-outline-variant/20 text-xs font-bold text-on-surface"
+            className="w-8 h-8 rounded-full bg-primary text-on-primary flex items-center justify-center overflow-hidden border-2 border-primary-container text-xs font-bold"
           >
-            {user?.full_name
-              ? user.full_name
-                  .split(" ")
-                  .map((n) => n[0])
-                  .join("")
-                  .toUpperCase()
-                  .slice(0, 2)
-              : "U"}
+            {initials}
           </button>
         </div>
       </div>

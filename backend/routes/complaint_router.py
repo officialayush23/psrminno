@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -20,6 +20,187 @@ from services.storage_service import generate_signed_upload_url
 router = APIRouter(prefix="/complaints", tags=["Complaints"])
 
 
+# ── Must come BEFORE /{complaint_id} so FastAPI doesn't match "map-pins" as a UUID ──
+
+@router.get("/map-pins")
+def get_map_pins(
+    db: Session = Depends(get_db),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Returns lat/lng of the authenticated citizen's complaints for the dashboard map."""
+    rows = db.execute(
+        text("""
+            SELECT
+                id,
+                complaint_number,
+                title,
+                status,
+                priority,
+                ST_Y(location::geometry) AS lat,
+                ST_X(location::geometry) AS lng
+            FROM complaints
+            WHERE citizen_id = CAST(:uid AS uuid)
+              AND is_deleted = false
+              AND location IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 50
+        """),
+        {"uid": str(current_user.user_id)},
+    ).mappings().all()
+
+    return [
+        {
+            "id": str(row["id"]),
+            "complaint_number": row["complaint_number"],
+            "title": row["title"],
+            "status": row["status"],
+            "priority": row["priority"],
+            "lat": float(row["lat"]),
+            "lng": float(row["lng"]),
+        }
+        for row in rows
+    ]
+
+
+@router.get("")
+def list_my_complaints(
+    status: Optional[str] = Query(default=None, description="Filter by status"),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Lists the authenticated citizen's own complaints, paginated."""
+
+    status_filter = ""
+    params = {
+        "uid": str(current_user.user_id),
+        "limit": limit,
+        "offset": offset,
+    }
+    if status:
+        status_filter = "AND status = :status"
+        params["status"] = status
+
+    rows = db.execute(
+        text(f"""
+            SELECT
+                id,
+                complaint_number,
+                title,
+                description,
+                address_text,
+                status,
+                priority,
+                is_repeat_complaint,
+                images,
+                created_at,
+                updated_at,
+                resolved_at,
+                ST_Y(location::geometry) AS lat,
+                ST_X(location::geometry) AS lng
+            FROM complaints
+            WHERE citizen_id = CAST(:uid AS uuid)
+              AND is_deleted = false
+              {status_filter}
+            ORDER BY created_at DESC
+            LIMIT :limit OFFSET :offset
+        """),
+        params,
+    ).mappings().all()
+
+    count_row = db.execute(
+        text(f"""
+            SELECT COUNT(*) AS total
+            FROM complaints
+            WHERE citizen_id = CAST(:uid AS uuid)
+              AND is_deleted = false
+              {status_filter}
+        """),
+        params,
+    ).mappings().first()
+
+    def safe_image_url(images_jsonb):
+        if not images_jsonb:
+            return None
+        imgs = images_jsonb if isinstance(images_jsonb, list) else []
+        if imgs and isinstance(imgs[0], dict):
+            return imgs[0].get("url")
+        return None
+
+    return {
+        "total": int(count_row["total"]),
+        "limit": limit,
+        "offset": offset,
+        "items": [
+            {
+                "id": str(row["id"]),
+                "complaint_number": row["complaint_number"],
+                "title": row["title"],
+                "description": row["description"],
+                "address_text": row["address_text"],
+                "status": row["status"],
+                "priority": row["priority"],
+                "is_repeat_complaint": bool(row["is_repeat_complaint"]),
+                "thumbnail_url": safe_image_url(row["images"]),
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+                "resolved_at": row["resolved_at"].isoformat() if row["resolved_at"] else None,
+                "lat": float(row["lat"]) if row["lat"] is not None else None,
+                "lng": float(row["lng"]) if row["lng"] is not None else None,
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.get("/{complaint_id}/history")
+def get_complaint_history(
+    complaint_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Returns the status change history for a complaint (for the timeline)."""
+    # First verify the complaint belongs to this user (or is admin/official)
+    complaint_row = db.execute(
+        text("""
+            SELECT citizen_id FROM complaints
+            WHERE id = CAST(:cid AS uuid) AND is_deleted = false
+        """),
+        {"cid": str(complaint_id)},
+    ).mappings().first()
+
+    if not complaint_row:
+        raise HTTPException(status_code=404, detail="Complaint not found")
+
+    if current_user.role == "citizen" and str(complaint_row["citizen_id"]) != str(current_user.user_id):
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+    rows = db.execute(
+        text("""
+            SELECT
+                old_status,
+                new_status,
+                reason,
+                created_at
+            FROM complaint_status_history
+            WHERE complaint_id = CAST(:cid AS uuid)
+            ORDER BY created_at ASC
+        """),
+        {"cid": str(complaint_id)},
+    ).mappings().all()
+
+    return [
+        {
+            "old_status": row["old_status"],
+            "new_status": row["new_status"],
+            "reason": row["reason"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        }
+        for row in rows
+    ]
+
+
 @router.get("/{complaint_id}")
 def get_complaint_by_id(
     complaint_id: UUID,
@@ -32,6 +213,7 @@ def get_complaint_by_id(
         current_user_id=current_user.user_id,
         current_user_role=current_user.role,
     )
+
 
 @router.post("/ingest", response_model=ComplaintIngestResponse)
 async def ingest_complaint(

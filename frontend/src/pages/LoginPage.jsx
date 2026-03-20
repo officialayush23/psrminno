@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { login } from "../api/authApi";
+import { login, getMe } from "../api/authApi";
+import client from "../api/client";
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -17,7 +18,15 @@ export default function LoginPage() {
     try {
       const data = await login(email, password);
       localStorage.setItem("token", data.access_token);
-      localStorage.setItem("auth_user", JSON.stringify(data));
+      // Set axios default header so getMe() works immediately
+      client.defaults.headers.common["Authorization"] = `Bearer ${data.access_token}`;
+      // Fetch full user profile (includes phone, preferred_language, opt-ins)
+      try {
+        const profile = await getMe();
+        localStorage.setItem("auth_user", JSON.stringify({ ...data, ...profile }));
+      } catch {
+        localStorage.setItem("auth_user", JSON.stringify(data));
+      }
       navigate("/dashboard");
     } catch (err) {
       setError(err.response?.data?.detail || "Login failed");

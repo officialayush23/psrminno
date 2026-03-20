@@ -7,7 +7,9 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from typing import Optional
 
 from config import settings
 from db import get_db
@@ -152,6 +154,64 @@ def me(current_user: TokenData = Depends(get_current_user), db: Session = Depend
         "user_id": str(user.id),
         "email": user.email,
         "full_name": user.full_name,
+        "phone": user.phone,
         "role": user.role,
+        "preferred_language": user.preferred_language,
+        "email_opt_in": user.email_opt_in,
+        "twilio_opt_in": user.twilio_opt_in,
         "is_active": user.is_active,
+    }
+
+
+class UpdateMeRequest(BaseModel):
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    preferred_language: Optional[str] = None
+    email_opt_in: Optional[bool] = None
+    twilio_opt_in: Optional[bool] = None
+
+
+@router.patch("/me")
+def update_me(
+    payload: UpdateMeRequest,
+    current_user: TokenData = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == current_user.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if payload.full_name is not None:
+        user.full_name = payload.full_name.strip()
+    if payload.phone is not None:
+        # Check uniqueness if phone is being set
+        phone_stripped = payload.phone.strip() or None
+        if phone_stripped:
+            existing = db.query(User).filter(
+                User.phone == phone_stripped,
+                User.id != current_user.user_id
+            ).first()
+            if existing:
+                raise HTTPException(status_code=409, detail="Phone already in use")
+        user.phone = phone_stripped
+    if payload.preferred_language is not None:
+        user.preferred_language = payload.preferred_language.strip()
+    if payload.email_opt_in is not None:
+        user.email_opt_in = payload.email_opt_in
+    if payload.twilio_opt_in is not None:
+        user.twilio_opt_in = payload.twilio_opt_in
+
+    user.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "user_id": str(user.id),
+        "email": user.email,
+        "full_name": user.full_name,
+        "phone": user.phone,
+        "role": user.role,
+        "preferred_language": user.preferred_language,
+        "email_opt_in": user.email_opt_in,
+        "twilio_opt_in": user.twilio_opt_in,
     }

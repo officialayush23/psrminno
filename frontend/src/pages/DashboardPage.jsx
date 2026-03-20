@@ -1,256 +1,433 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
+import { useEffect, useState, useRef } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { MapContainer, TileLayer, Marker, Popup, ZoomControl } from "react-leaflet";
 import L from "leaflet";
-import "leaflet/dist/leaflet.css";
 import AppLayout from "../components/AppLayout";
-import client from "../api/client";
+import { fetchMyComplaints, fetchMapPins, fetchMyStats } from "../api/complaintsApi";
 
-const markerIcon = new L.Icon({
+// Fix leaflet default icon
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
   iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
   shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
 });
 
-const MOCK_COMPLAINTS = [
-  {
-    id: "1",
-    complaint_number: "GR-2024-04821",
-    title: "Drainage Blockage",
-    address_text: "Rohini Sector 7, Delhi-110085",
-    status: "in_progress",
-    step: 3,
-    created_at: "2024-03-14T10:00:00Z",
-  },
-  {
-    id: "2",
-    complaint_number: "GR-2024-03102",
-    title: "Pothole Repair",
-    address_text: "Sector 12, Dwarka",
-    status: "resolved",
-    step: 4,
-    created_at: "2024-02-20T10:00:00Z",
-    resolved_at: "2024-03-12T10:00:00Z",
-  },
-  {
-    id: "3",
-    complaint_number: "GR-2024-05119",
-    title: "Broken Streetlight",
-    address_text: "Main Market, Karol Bagh",
-    status: "received",
-    step: 1,
-    created_at: "2024-03-18T10:00:00Z",
-  },
-];
-
-const STATUS_STYLES = {
-  in_progress: "bg-primary/10 text-primary",
-  resolved: "bg-tertiary-container/20 text-tertiary",
-  received: "bg-surface-container-high text-on-surface-variant",
+const STATUS_COLOR = {
+  received: "#6750A4",
+  clustered: "#6750A4",
+  mapped: "#6750A4",
+  workflow_started: "#2196F3",
+  in_progress: "#FF9800",
+  midway_survey_sent: "#FF9800",
+  resolved: "#4CAF50",
+  closed: "#4CAF50",
+  rejected: "#F44336",
+  escalated: "#F44336",
+  emergency: "#B00020",
+  constraint_blocked: "#795548",
 };
 
+const STATUS_LABEL = {
+  received: "Received",
+  clustered: "Clustered",
+  mapped: "Mapped",
+  workflow_started: "Workflow Started",
+  in_progress: "In Progress",
+  midway_survey_sent: "Survey Sent",
+  resolved: "Resolved",
+  closed: "Closed",
+  rejected: "Rejected",
+  escalated: "Escalated",
+  emergency: "Emergency",
+  constraint_blocked: "Blocked",
+};
+
+function makeIcon(color) {
+  return L.divIcon({
+    className: "",
+    html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,.4)"></div>`,
+    iconSize: [14, 14],
+    iconAnchor: [7, 7],
+  });
+}
+
+function getStepIndex(status) {
+  const ORDER = ["received","clustered","mapped","workflow_started","in_progress","resolved","closed"];
+  const idx = ORDER.indexOf(status);
+  return idx === -1 ? 0 : idx;
+}
+
+function timeAgo(isoString) {
+  if (!isoString) return "";
+  const diff = Date.now() - new Date(isoString).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
 export default function DashboardPage() {
-  const [complaints, setComplaints] = useState(MOCK_COMPLAINTS);
+  const navigate = useNavigate();
+  const user = JSON.parse(localStorage.getItem("auth_user") || "{}");
+  const mapRef = useRef(null);
+
+  const [complaints, setComplaints] = useState([]);
+  const [pins, setPins] = useState([]);
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [lastUpdated, setLastUpdated] = useState(null);
 
   useEffect(() => {
-    async function tryFetch() {
+    async function load() {
+      setLoading(true);
       try {
-        const res = await client.get("/complaints");
-        if (res.data && Array.isArray(res.data) && res.data.length > 0) {
-          setComplaints(res.data);
-        }
-      } catch {
-        // Use mock data if API unavailable
+        const [complaintsRes, pinsRes, statsRes] = await Promise.all([
+          fetchMyComplaints({ limit: 5 }),
+          fetchMapPins(),
+          fetchMyStats(),
+        ]);
+        setComplaints(complaintsRes.items || []);
+        setPins(pinsRes || []);
+        setStats(statsRes);
+        setLastUpdated(new Date().toISOString());
+      } catch (e) {
+        setError("Failed to load dashboard data. Please try again.");
+      } finally {
+        setLoading(false);
       }
     }
-    tryFetch();
+    load();
   }, []);
 
-  return (
-    <AppLayout title="Dashboard">
-      <div className="grid grid-cols-1 lg:grid-cols-[62%_38%] gap-8">
-        {/* LEFT COLUMN */}
-        <div className="space-y-8">
-          {/* Map Card */}
-          <section className="bg-surface-container-lowest rounded-xl overflow-hidden shadow-sm border border-outline-variant/5">
-            <div className="p-5 flex items-center justify-between border-b border-surface-container-low">
-              <div className="flex items-center gap-3">
-                <h3 className="font-headline font-bold text-on-surface">Delhi Complaint Map</h3>
-                <span className="flex items-center gap-1.5 px-2 py-0.5 bg-tertiary-container/20 text-tertiary text-[10px] font-bold uppercase tracking-wider rounded-full">
-                  <span className="w-1.5 h-1.5 bg-tertiary-container rounded-full animate-pulse" />
-                  Live
-                </span>
-              </div>
-            </div>
-            <div className="relative h-[380px] overflow-hidden" style={{ zIndex: 1 }}>
-              <MapContainer
-                center={[28.6139, 77.209]}
-                zoom={11}
-                scrollWheelZoom={true}
-                style={{ height: "100%", width: "100%" }}
-              >
-                <TileLayer
-                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                  attribution='&copy; <a href="https://osm.org/copyright">OSM</a>'
-                />
-                {/* Sample Markers */}
-                <Marker position={[28.7041, 77.1025]} icon={markerIcon}>
-                  <Popup>Rohini — 12 complaints</Popup>
-                </Marker>
-                <Marker position={[28.5921, 77.046]} icon={markerIcon}>
-                  <Popup>Dwarka — 8 complaints</Popup>
-                </Marker>
-                <Marker position={[28.6519, 77.1909]} icon={markerIcon}>
-                  <Popup>Karol Bagh — 7 complaints</Popup>
-                </Marker>
-              </MapContainer>
-              {/* Map Legend */}
-              <div className="absolute bottom-4 left-4 right-4 bg-white/90 backdrop-blur-sm p-3 rounded-lg flex flex-wrap justify-between items-center gap-4 text-xs font-medium border border-outline-variant/20 z-[1000]">
-                <div className="flex gap-4">
-                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-error" /> Critical (12)</span>
-                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-secondary-container" /> Pending (8)</span>
-                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-primary" /> Ongoing (7)</span>
-                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-tertiary-container" /> Resolved (3)</span>
-                </div>
-                <span className="text-on-surface-variant italic">Data updated 2m ago</span>
-              </div>
-            </div>
-          </section>
+  const activeComplaints = complaints.filter(
+    (c) => !["resolved", "closed", "rejected"].includes(c.status)
+  );
+  const resolvedComplaints = complaints.filter((c) =>
+    ["resolved", "closed"].includes(c.status)
+  );
 
-          {/* My Complaints */}
-          <section>
+  // Map center: average of pins, or Delhi default
+  const mapCenter =
+    pins.length > 0
+      ? [
+          pins.reduce((s, p) => s + p.lat, 0) / pins.length,
+          pins.reduce((s, p) => s + p.lng, 0) / pins.length,
+        ]
+      : [28.6139, 77.209];
+
+  // SLA ring — based on real stats
+  const totalActive = stats?.active_count ?? 0;
+  const totalResolved = stats?.resolved_count ?? 0;
+  const totalAll = stats?.total_count ?? 1;
+  const slaPercent = totalAll > 0 ? Math.round((totalResolved / totalAll) * 100) : 0;
+  const circumference = 2 * Math.PI * 24;
+  const slaOffset = circumference * (1 - slaPercent / 100);
+
+  return (
+    <AppLayout>
+      <div className="flex flex-col gap-6 p-6 lg:flex-row min-h-0">
+        {/* ── LEFT COLUMN ── */}
+        <div className="flex flex-col gap-5 lg:w-[58%]">
+          {/* Header */}
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-2xl font-headline font-bold text-on-surface">
+                Namaskar, {user.full_name?.split(" ")[0] || "Citizen"} 🙏
+              </h1>
+              <p className="text-sm text-on-surface-variant mt-0.5">
+                {loading
+                  ? "Loading your grievances…"
+                  : `${stats?.total_count ?? 0} total · ${stats?.active_count ?? 0} active · ${stats?.resolved_count ?? 0} resolved`}
+              </p>
+            </div>
+            <Link
+              to="/submit"
+              className="bg-primary text-on-primary px-5 py-2.5 rounded-full text-sm font-semibold hover:bg-primary/90 transition flex items-center gap-2"
+            >
+              <span className="material-symbols-outlined text-[18px]">add</span>
+              New Report
+            </Link>
+          </div>
+
+          {error && (
+            <div className="bg-error/10 border border-error/30 rounded-xl p-4 text-error text-sm">
+              {error}
+            </div>
+          )}
+
+          {/* Map */}
+          <div className="relative rounded-2xl overflow-hidden border border-outline-variant">
+            <div className="absolute top-3 left-3 z-[500] bg-surface/90 backdrop-blur-sm px-3 py-1.5 rounded-full flex items-center gap-2 text-xs font-medium shadow-sm">
+              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+              {pins.length > 0 ? `${pins.length} complaints mapped` : "No locations yet"}
+              {lastUpdated && (
+                <span className="text-on-surface-variant ml-1">· {timeAgo(lastUpdated)}</span>
+              )}
+            </div>
+
+            <MapContainer
+              center={mapCenter}
+              zoom={11}
+              scrollWheelZoom={false}
+              style={{ height: "300px", width: "100%" }}
+              zoomControl={false}
+              ref={mapRef}
+            >
+              <TileLayer
+                attribution='&copy; <a href="https://osm.org/copyright">OSM</a>'
+                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+              />
+              <ZoomControl position="bottomright" />
+              {pins.map((pin) => (
+                <Marker
+                  key={pin.id}
+                  position={[pin.lat, pin.lng]}
+                  icon={makeIcon(STATUS_COLOR[pin.status] || "#6750A4")}
+                >
+                  <Popup>
+                    <div className="text-sm">
+                      <p className="font-bold">{pin.title}</p>
+                      <p className="text-xs capitalize">{STATUS_LABEL[pin.status] || pin.status}</p>
+                      <Link
+                        to={`/complaints/${pin.id}`}
+                        className="text-primary underline text-xs"
+                      >
+                        View details →
+                      </Link>
+                    </div>
+                  </Popup>
+                </Marker>
+              ))}
+            </MapContainer>
+
+            {/* Map legend */}
+            <div className="absolute bottom-3 left-3 z-[500] bg-surface/90 backdrop-blur-sm px-3 py-1.5 rounded-xl text-xs shadow-sm flex gap-3">
+              {["in_progress", "resolved", "rejected"].map((s) => (
+                <span key={s} className="flex items-center gap-1.5">
+                  <span
+                    className="w-2 h-2 rounded-full"
+                    style={{ background: STATUS_COLOR[s] }}
+                  />
+                  {STATUS_LABEL[s]} ({pins.filter((p) => p.status === s).length})
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* Recent Complaints */}
+          <div className="bg-surface-container-low rounded-2xl p-5 border border-outline-variant">
             <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-3">
-                <h3 className="font-headline font-bold text-on-surface">My Complaints</h3>
-                <span className="px-2 py-0.5 bg-primary/10 text-primary text-xs font-bold rounded-full">
-                  {complaints.filter((c) => c.status !== "resolved").length} Active
+              <h2 className="font-headline font-semibold text-on-surface flex items-center gap-2">
+                <span className="material-symbols-outlined text-[20px] text-primary">
+                  receipt_long
+                </span>
+                Recent Complaints
+              </h2>
+              <Link to="/my-complaints" className="text-primary text-sm hover:underline">
+                View all →
+              </Link>
+            </div>
+
+            {loading ? (
+              <div className="flex flex-col gap-3">
+                {[1, 2, 3].map((n) => (
+                  <div key={n} className="h-16 rounded-xl bg-outline-variant/30 animate-pulse" />
+                ))}
+              </div>
+            ) : complaints.length === 0 ? (
+              <div className="text-center py-8 text-on-surface-variant">
+                <span className="material-symbols-outlined text-5xl mb-2">inbox</span>
+                <p className="text-sm">No complaints filed yet.</p>
+                <Link to="/submit" className="text-primary text-sm mt-1 inline-block hover:underline">
+                  File your first one →
+                </Link>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {complaints.map((c) => (
+                  <div
+                    key={c.id}
+                    className="flex items-start gap-3 p-3 rounded-xl bg-surface-container hover:bg-surface-container-high transition cursor-pointer"
+                    onClick={() => navigate(`/complaints/${c.id}`)}
+                  >
+                    <div className="flex flex-col gap-1 flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-on-surface-variant font-mono">
+                          #{c.complaint_number}
+                        </span>
+                        <span
+                          className="text-xs font-semibold px-2 py-0.5 rounded-full capitalize"
+                          style={{
+                            background: STATUS_COLOR[c.status] + "22",
+                            color: STATUS_COLOR[c.status],
+                          }}
+                        >
+                          {STATUS_LABEL[c.status] || c.status}
+                        </span>
+                        {c.is_repeat_complaint && (
+                          <span className="text-xs text-error font-semibold">Repeat</span>
+                        )}
+                      </div>
+                      <p className="text-sm font-medium text-on-surface truncate">{c.title}</p>
+                      {c.address_text && (
+                        <p className="text-xs text-on-surface-variant truncate">{c.address_text}</p>
+                      )}
+                    </div>
+                    <div className="text-right text-xs text-on-surface-variant whitespace-nowrap">
+                      {timeAgo(c.created_at)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* ── RIGHT COLUMN ── */}
+        <div className="flex flex-col gap-5 lg:w-[42%]">
+          {/* Stats Row */}
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: "Total", value: stats?.total_count ?? "—", icon: "receipt_long" },
+              { label: "Active", value: stats?.active_count ?? "—", icon: "pending" },
+              { label: "Resolved", value: stats?.resolved_count ?? "—", icon: "check_circle" },
+            ].map((s) => (
+              <div
+                key={s.label}
+                className="bg-surface-container-low rounded-2xl p-4 border border-outline-variant flex flex-col items-center gap-1"
+              >
+                <span className="material-symbols-outlined text-primary text-[24px]">
+                  {s.icon}
+                </span>
+                <span className="text-2xl font-headline font-bold text-on-surface">
+                  {loading ? "…" : s.value}
+                </span>
+                <span className="text-xs text-on-surface-variant">{s.label}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* SLA Tracker */}
+          <div className="bg-surface-container-low rounded-2xl p-5 border border-outline-variant">
+            <h2 className="font-headline font-semibold text-on-surface mb-4 flex items-center gap-2">
+              <span className="material-symbols-outlined text-[20px] text-primary">timer</span>
+              Resolution Rate
+            </h2>
+            <div className="flex items-center gap-6">
+              <div className="relative w-16 h-16">
+                <svg className="rotate-[-90deg]" width="64" height="64" viewBox="0 0 64 64">
+                  <circle cx="32" cy="32" r="24" fill="none" stroke="#e8def8" strokeWidth="6" />
+                  <circle
+                    cx="32"
+                    cy="32"
+                    r="24"
+                    fill="none"
+                    stroke="#6750A4"
+                    strokeWidth="6"
+                    strokeLinecap="round"
+                    strokeDasharray={circumference}
+                    strokeDashoffset={slaOffset}
+                  />
+                </svg>
+                <span className="absolute inset-0 flex items-center justify-center text-sm font-bold text-on-surface">
+                  {loading ? "…" : `${slaPercent}%`}
                 </span>
               </div>
-              <Link to="/my-complaints" className="text-xs font-bold text-primary hover:underline">View All History</Link>
+              <div>
+                <p className="text-sm font-medium text-on-surface">
+                  {loading ? "Loading…" : `${totalResolved} of ${totalAll} resolved`}
+                </p>
+                {stats?.avg_resolution_days != null && (
+                  <p className="text-xs text-on-surface-variant mt-1">
+                    Avg. {stats.avg_resolution_days} days to resolve
+                  </p>
+                )}
+                <span
+                  className={`text-xs font-semibold mt-1 inline-block px-2 py-0.5 rounded-full ${
+                    slaPercent >= 70
+                      ? "bg-green-100 text-green-700"
+                      : slaPercent >= 40
+                      ? "bg-yellow-100 text-yellow-700"
+                      : "bg-red-100 text-red-700"
+                  }`}
+                >
+                  {slaPercent >= 70 ? "On Track" : slaPercent >= 40 ? "In Progress" : "Low"}
+                </span>
+              </div>
             </div>
-            <div className="space-y-4">
-              {complaints.map((c) => (
+          </div>
+
+          {/* Quick Actions */}
+          <div className="bg-surface-container-low rounded-2xl p-5 border border-outline-variant">
+            <h2 className="font-headline font-semibold text-on-surface mb-4 flex items-center gap-2">
+              <span className="material-symbols-outlined text-[20px] text-primary">bolt</span>
+              Quick Actions
+            </h2>
+            <div className="grid grid-cols-2 gap-3">
+              {[
+                { label: "Report Issue", icon: "add_circle", to: "/submit", primary: true },
+                { label: "My Complaints", icon: "list_alt", to: "/my-complaints" },
+                {
+                  label: "Call 1031",
+                  icon: "phone",
+                  onClick: () => window.open("tel:1031"),
+                },
+                {
+                  label: "Notifications",
+                  icon: "notifications",
+                  to: "/notifications",
+                },
+              ].map((action) => {
+                const cls = `flex flex-col items-center gap-1.5 p-3 rounded-xl border transition text-sm font-medium ${
+                  action.primary
+                    ? "bg-primary text-on-primary border-primary hover:bg-primary/90"
+                    : "bg-surface-container border-outline-variant text-on-surface hover:bg-surface-container-high"
+                }`;
+                if (action.to) {
+                  return (
+                    <Link key={action.label} to={action.to} className={cls}>
+                      <span className="material-symbols-outlined text-[22px]">{action.icon}</span>
+                      {action.label}
+                    </Link>
+                  );
+                }
+                return (
+                  <button key={action.label} className={cls} onClick={action.onClick}>
+                    <span className="material-symbols-outlined text-[22px]">{action.icon}</span>
+                    {action.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Active complaints list summary */}
+          {!loading && activeComplaints.length > 0 && (
+            <div className="bg-surface-container-low rounded-2xl p-5 border border-outline-variant">
+              <h2 className="font-headline font-semibold text-on-surface mb-3 flex items-center gap-2">
+                <span className="material-symbols-outlined text-[20px] text-orange-500">
+                  pending
+                </span>
+                Active ({activeComplaints.length})
+              </h2>
+              {activeComplaints.map((c) => (
                 <Link
                   key={c.id}
                   to={`/complaints/${c.id}`}
-                  className="block bg-surface-container-lowest p-5 rounded-xl border border-outline-variant/10 hover:shadow-md transition-shadow"
+                  className="flex items-center gap-3 py-2 border-b border-outline-variant last:border-0 hover:text-primary transition"
                 >
-                  <div className="flex justify-between items-start mb-3">
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-[10px] font-mono text-on-surface-variant">#{c.complaint_number}</span>
-                        <span className={`px-2 py-0.5 text-[10px] font-bold rounded uppercase ${STATUS_STYLES[c.status] || STATUS_STYLES.received}`}>
-                          {c.status?.replace(/_/g, " ")}
-                        </span>
-                      </div>
-                      <h4 className="font-bold text-on-surface">{c.title}</h4>
-                      <p className="text-xs text-on-surface-variant flex items-center gap-1 mt-0.5">
-                        <span className="material-symbols-outlined text-xs">location_on</span>
-                        {c.address_text}
-                      </p>
-                    </div>
-                  </div>
-                  {/* Progress Bar */}
-                  <div className="h-1.5 w-full bg-surface-container-low rounded-full overflow-hidden flex">
-                    {[1, 2, 3, 4].map((s) => (
-                      <div
-                        key={s}
-                        className={`h-full w-1/4 ${s <= (c.step || 1)
-                          ? c.status === "resolved" ? "bg-tertiary-container" : "bg-primary"
-                          : "bg-surface-container-low"
-                        } ${s < 4 ? "border-r border-white" : ""}`}
-                      />
-                    ))}
-                  </div>
-                  {c.status === "resolved" && c.resolved_at && (
-                    <p className="text-[10px] text-tertiary font-bold mt-2 flex items-center gap-1">
-                      <span className="material-symbols-outlined text-[14px]" style={{ fontVariationSettings: "'FILL' 1" }}>check_circle</span>
-                      Issue resolved on {new Date(c.resolved_at).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}
-                    </p>
-                  )}
+                  <span className="text-xs font-mono text-on-surface-variant">
+                    #{c.complaint_number}
+                  </span>
+                  <span className="text-sm text-on-surface truncate flex-1">{c.title}</span>
                 </Link>
               ))}
             </div>
-          </section>
-        </div>
-
-        {/* RIGHT COLUMN */}
-        <div className="space-y-8">
-          {/* Area Activity */}
-          <section className="bg-surface-container-lowest p-5 rounded-xl border border-outline-variant/5 shadow-sm">
-            <h3 className="font-headline font-bold text-on-surface mb-4">Ward Activity</h3>
-            <div className="space-y-3">
-              {[
-                { name: "Drainage", count: 12, color: "bg-primary" },
-                { name: "Road Repair", count: 4, color: "bg-secondary-container" },
-                { name: "Streetlights", count: 2, color: "bg-outline" },
-              ].map((item) => (
-                <div key={item.name} className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-xs font-medium text-on-surface-variant">
-                    <span className={`w-2 h-2 rounded-full ${item.color}`} />
-                    {item.name}
-                  </div>
-                  <span className="text-xs font-bold">{item.count} Reports</span>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          {/* SLA Tracker */}
-          <section className="bg-surface-container-lowest p-6 rounded-xl border border-outline-variant/5 shadow-sm text-center">
-            <h3 className="font-headline font-bold text-on-surface mb-6 text-left">Active SLA Tracker</h3>
-            <div className="relative w-32 h-32 mx-auto mb-4">
-              <svg className="w-full h-full -rotate-90">
-                <circle className="text-surface-container-low" cx="64" cy="64" fill="transparent" r="58" stroke="currentColor" strokeWidth="8" />
-                <circle className="text-primary" cx="64" cy="64" fill="transparent" r="58" stroke="currentColor" strokeDasharray="364.4" strokeDashoffset="160.3" strokeWidth="8" />
-              </svg>
-              <div className="absolute inset-0 flex flex-col items-center justify-center">
-                <span className="text-lg font-bold">23</span>
-                <span className="text-[10px] text-on-surface-variant font-medium">of 41 days</span>
-              </div>
-            </div>
-            <div className="mb-4">
-              <span className="px-3 py-1 bg-tertiary-container/20 text-tertiary text-xs font-bold rounded-full">On Track</span>
-            </div>
-            <p className="text-xs text-on-surface-variant">Target Resolution Deadline:<br /><strong className="text-on-surface">April 24, 2024</strong></p>
-          </section>
-
-          {/* Nearby Alerts */}
-          <section className="bg-surface-container-lowest p-5 rounded-xl border border-outline-variant/5 shadow-sm">
-            <h3 className="font-headline font-bold text-on-surface mb-4">Nearby Alerts</h3>
-            <div className="space-y-4">
-              <div className="flex gap-3">
-                <div className="mt-1 w-2 h-2 rounded-full bg-error shrink-0" />
-                <div>
-                  <p className="text-xs font-bold leading-tight">Water Supply Interruption</p>
-                  <p className="text-[10px] text-on-surface-variant">MCD Maintenance in Rohini Sector 7-8</p>
-                </div>
-              </div>
-              <div className="flex gap-3">
-                <div className="mt-1 w-2 h-2 rounded-full bg-secondary-container shrink-0" />
-                <div>
-                  <p className="text-xs font-bold leading-tight">Road Diversion: Sector 11</p>
-                  <p className="text-[10px] text-on-surface-variant">Effective tomorrow morning 8 AM</p>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Quick Actions */}
-          <section className="space-y-3">
-            <Link
-              to="/submit"
-              className="w-full flex items-center justify-center gap-2 bg-primary text-on-primary py-3.5 rounded-lg font-bold text-sm shadow-lg shadow-primary/20 hover:bg-primary-container hover:text-on-primary-container transition-all active:scale-[0.98]"
-            >
-              <span className="material-symbols-outlined text-lg">add</span>
-              Report New Issue
-            </Link>
-            <button className="w-full flex items-center justify-center gap-2 bg-white text-on-surface border border-outline-variant/20 py-3 rounded-lg font-bold text-sm hover:bg-surface-container-low transition-colors">
-              <span className="material-symbols-outlined text-lg">call</span>
-              Call Centre (1031)
-            </button>
-          </section>
+          )}
         </div>
       </div>
     </AppLayout>

@@ -1,157 +1,277 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import AppLayout from "../components/AppLayout";
+import { fetchMyComplaints, fetchMyStats } from "../api/complaintsApi";
 
-const MOCK_COMPLAINTS = [
-  { id: "1", complaint_number: "GR-2024-04821", title: "Drainage Blockage", category: "Drainage", address_text: "Rohini Sector 7", status: "in_progress", created_at: "2024-03-14T10:00:00Z", step: 3 },
-  { id: "2", complaint_number: "GR-2024-03102", title: "Pothole Repair", category: "Road", address_text: "Sector 12, Dwarka", status: "resolved", created_at: "2024-02-20T10:00:00Z", step: 4 },
-  { id: "3", complaint_number: "GR-2024-05119", title: "Broken Streetlight", category: "Streetlight", address_text: "Main Market, Karol Bagh", status: "received", created_at: "2024-03-18T10:00:00Z", step: 1 },
-  { id: "4", complaint_number: "GR-2024-05220", title: "Garbage Overflow", category: "Sanitation", address_text: "Block C, Janakpuri", status: "in_progress", created_at: "2024-03-17T09:00:00Z", step: 2 },
-  { id: "5", complaint_number: "GR-2024-05301", title: "Water Leakage", category: "Water", address_text: "Sector 15, Rohini", status: "received", created_at: "2024-03-19T14:00:00Z", step: 1 },
-];
-
-const STATUS_STYLES = {
-  in_progress: "bg-primary/10 text-primary",
-  resolved: "bg-tertiary-container/20 text-tertiary",
-  received: "bg-surface-container-high text-on-surface-variant",
+const STATUS_LABEL = {
+  received: "Received",
+  clustered: "Clustered",
+  mapped: "Mapped",
+  workflow_started: "Workflow Started",
+  in_progress: "In Progress",
+  midway_survey_sent: "Survey Sent",
+  resolved: "Resolved",
+  closed: "Closed",
+  rejected: "Rejected",
+  escalated: "Escalated",
+  emergency: "Emergency",
+  constraint_blocked: "Blocked",
 };
 
-const CATEGORIES = ["All", "Drainage", "Road", "Streetlight", "Sanitation", "Water"];
-const STATUSES = ["All", "received", "in_progress", "resolved"];
+const STATUS_COLOR = {
+  received: "text-purple-600 bg-purple-50",
+  clustered: "text-purple-600 bg-purple-50",
+  mapped: "text-blue-600 bg-blue-50",
+  workflow_started: "text-blue-600 bg-blue-50",
+  in_progress: "text-orange-600 bg-orange-50",
+  midway_survey_sent: "text-orange-600 bg-orange-50",
+  resolved: "text-green-600 bg-green-50",
+  closed: "text-green-600 bg-green-50",
+  rejected: "text-red-600 bg-red-50",
+  escalated: "text-red-600 bg-red-50",
+  emergency: "text-red-700 bg-red-100",
+  constraint_blocked: "text-amber-700 bg-amber-50",
+};
+
+const PRIORITY_COLOR = {
+  low: "text-slate-500",
+  normal: "text-blue-500",
+  high: "text-orange-500",
+  critical: "text-red-600",
+  emergency: "text-red-800 font-bold",
+};
+
+const STATUS_OPTIONS = [
+  "All",
+  "received", "in_progress", "resolved", "closed", "rejected", "escalated",
+];
+
+function formatDate(iso) {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleDateString("en-IN", {
+    day: "numeric", month: "short", year: "numeric",
+  });
+}
 
 export default function MyComplaintsPage() {
-  const [filterCategory, setFilterCategory] = useState("All");
-  const [filterStatus, setFilterStatus] = useState("All");
-  const [search, setSearch] = useState("");
+  const navigate = useNavigate();
 
-  const filtered = MOCK_COMPLAINTS.filter((c) => {
-    if (filterCategory !== "All" && c.category !== filterCategory) return false;
-    if (filterStatus !== "All" && c.status !== filterStatus) return false;
-    if (search && !c.complaint_number.toLowerCase().includes(search.toLowerCase()) && !c.title.toLowerCase().includes(search.toLowerCase())) return false;
-    return true;
+  const [complaints, setComplaints] = useState([]);
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("All");
+
+  useEffect(() => {
+    async function load() {
+      setLoading(true);
+      try {
+        const [listRes, statsRes] = await Promise.all([
+          fetchMyComplaints({ limit: 100 }),
+          fetchMyStats(),
+        ]);
+        setComplaints(listRes.items || []);
+        setStats(statsRes);
+      } catch (e) {
+        setError("Failed to load complaints.");
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  // Client-side filtering
+  const filtered = complaints.filter((c) => {
+    const matchStatus = statusFilter === "All" || c.status === statusFilter;
+    const q = search.toLowerCase();
+    const matchSearch =
+      !q ||
+      c.title?.toLowerCase().includes(q) ||
+      c.complaint_number?.toLowerCase().includes(q) ||
+      c.address_text?.toLowerCase().includes(q);
+    return matchStatus && matchSearch;
   });
 
   return (
-    <AppLayout title="My Complaints">
-      {/* Breadcrumb */}
-      <nav className="flex items-center gap-2 text-xs text-on-surface-variant font-medium mb-6">
-        <Link to="/dashboard" className="hover:text-primary">Dashboard</Link>
-        <span className="material-symbols-outlined text-[14px]">chevron_right</span>
-        <span className="text-primary font-bold">My Complaints</span>
-      </nav>
+    <AppLayout>
+      <div className="p-6 flex flex-col gap-6">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-headline font-bold text-on-surface">My Complaints</h1>
+          <Link
+            to="/submit"
+            className="bg-primary text-on-primary px-5 py-2.5 rounded-full text-sm font-semibold hover:bg-primary/90 transition flex items-center gap-2"
+          >
+            <span className="material-symbols-outlined text-[18px]">add</span>
+            New Report
+          </Link>
+        </div>
 
-      {/* Stats Row */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-        {[
-          { label: "Total Filed", value: MOCK_COMPLAINTS.length, icon: "assignment", color: "text-primary", bg: "bg-primary/10" },
-          { label: "Active", value: MOCK_COMPLAINTS.filter((c) => c.status !== "resolved").length, icon: "pending", color: "text-secondary", bg: "bg-secondary-container/10" },
-          { label: "Resolved", value: MOCK_COMPLAINTS.filter((c) => c.status === "resolved").length, icon: "check_circle", color: "text-tertiary", bg: "bg-tertiary-container/10" },
-          { label: "Avg. Days", value: "12", icon: "schedule", color: "text-on-surface-variant", bg: "bg-surface-container-low" },
-        ].map((s) => (
-          <div key={s.label} className="bg-surface-container-lowest p-4 rounded-xl border border-outline-variant/10 shadow-sm">
-            <div className="flex items-center gap-2 mb-2">
-              <div className={`w-8 h-8 rounded-lg ${s.bg} flex items-center justify-center`}>
-                <span className={`material-symbols-outlined text-lg ${s.color}`}>{s.icon}</span>
+        {/* Stats Row */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {[
+            { label: "Total", value: stats?.total_count, icon: "receipt_long" },
+            { label: "Active", value: stats?.active_count, icon: "pending" },
+            { label: "Resolved", value: stats?.resolved_count, icon: "check_circle" },
+            {
+              label: "Avg Days",
+              value: stats?.avg_resolution_days != null
+                ? stats.avg_resolution_days.toFixed(1)
+                : null,
+              icon: "schedule",
+            },
+          ].map((s) => (
+            <div
+              key={s.label}
+              className="bg-surface-container-low border border-outline-variant rounded-2xl p-4 flex items-center gap-3"
+            >
+              <span className="material-symbols-outlined text-primary text-[24px]">{s.icon}</span>
+              <div>
+                <p className="text-xl font-headline font-bold text-on-surface">
+                  {loading ? "…" : (s.value ?? "—")}
+                </p>
+                <p className="text-xs text-on-surface-variant">{s.label}</p>
               </div>
             </div>
-            <p className="text-xl font-bold font-mono">{s.value}</p>
-            <p className="text-[10px] text-on-surface-variant font-medium uppercase tracking-wider">{s.label}</p>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
 
-      {/* Filters */}
-      <div className="bg-surface-container-lowest rounded-xl border border-outline-variant/10 shadow-sm mb-6">
-        <div className="p-4 flex flex-wrap items-center gap-4">
-          {/* Search */}
-          <div className="relative flex-1 min-w-[200px]">
-            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant text-sm">search</span>
+        {/* Filters */}
+        <div className="flex flex-col sm:flex-row gap-3">
+          <div className="flex items-center gap-2 bg-surface-container border border-outline-variant rounded-xl px-3 py-2 flex-1">
+            <span className="material-symbols-outlined text-on-surface-variant text-[20px]">
+              search
+            </span>
             <input
-              className="w-full pl-10 pr-4 py-2 bg-surface-container-low border-none rounded-lg text-sm focus:ring-2 focus:ring-primary/20"
-              placeholder="Search by ID or title..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by title, number, or address…"
+              className="bg-transparent text-sm text-on-surface placeholder:text-on-surface-variant outline-none flex-1"
             />
           </div>
-          {/* Category Filter */}
           <select
-            className="px-3 py-2 bg-surface-container-low border-none rounded-lg text-sm font-medium focus:ring-2 focus:ring-primary/20"
-            value={filterCategory}
-            onChange={(e) => setFilterCategory(e.target.value)}
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="bg-surface-container border border-outline-variant rounded-xl px-3 py-2 text-sm text-on-surface outline-none"
           >
-            {CATEGORIES.map((c) => <option key={c} value={c}>{c === "All" ? "All Categories" : c}</option>)}
-          </select>
-          {/* Status Filter */}
-          <select
-            className="px-3 py-2 bg-surface-container-low border-none rounded-lg text-sm font-medium focus:ring-2 focus:ring-primary/20"
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
-          >
-            {STATUSES.map((s) => <option key={s} value={s}>{s === "All" ? "All Statuses" : s.replace(/_/g, " ")}</option>)}
+            {STATUS_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s === "All" ? "All Statuses" : STATUS_LABEL[s] || s}
+              </option>
+            ))}
           </select>
         </div>
-      </div>
 
-      {/* Table */}
-      <div className="bg-surface-container-lowest rounded-xl border border-outline-variant/10 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-surface-container-low">
-                <th className="text-left px-5 py-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">ID</th>
-                <th className="text-left px-5 py-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Category</th>
-                <th className="text-left px-5 py-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Location</th>
-                <th className="text-left px-5 py-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Filed On</th>
-                <th className="text-left px-5 py-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Status</th>
-                <th className="text-left px-5 py-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Progress</th>
-                <th className="text-left px-5 py-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((c) => (
-                <tr key={c.id} className="border-b border-surface-container-low/50 hover:bg-surface-container-low/30 transition-colors">
-                  <td className="px-5 py-4 font-mono text-xs text-on-surface-variant">#{c.complaint_number}</td>
-                  <td className="px-5 py-4">
-                    <span className="px-2 py-0.5 bg-surface-container-low text-on-surface-variant text-[10px] font-bold rounded">{c.category}</span>
-                  </td>
-                  <td className="px-5 py-4 text-xs text-on-surface-variant">{c.address_text}</td>
-                  <td className="px-5 py-4 text-xs text-on-surface-variant">
-                    {new Date(c.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
-                  </td>
-                  <td className="px-5 py-4">
-                    <span className={`px-2 py-0.5 text-[10px] font-bold rounded uppercase ${STATUS_STYLES[c.status] || STATUS_STYLES.received}`}>
-                      {c.status?.replace(/_/g, " ")}
-                    </span>
-                  </td>
-                  <td className="px-5 py-4">
-                    <div className="flex gap-1">
-                      {[1, 2, 3, 4].map((s) => (
-                        <div
-                          key={s}
-                          className={`w-2.5 h-2.5 rounded-full ${
-                            s <= (c.step || 1)
-                              ? c.status === "resolved" ? "bg-tertiary-container" : "bg-primary"
-                              : "bg-surface-container-low"
-                          }`}
-                        />
-                      ))}
-                    </div>
-                  </td>
-                  <td className="px-5 py-4">
-                    <Link to={`/complaints/${c.id}`} className="text-primary text-xs font-bold hover:underline">View</Link>
-                  </td>
-                </tr>
+        {error && (
+          <div className="bg-error/10 border border-error/30 rounded-xl p-4 text-error text-sm">
+            {error}
+          </div>
+        )}
+
+        {/* Table */}
+        <div className="bg-surface-container-low border border-outline-variant rounded-2xl overflow-hidden">
+          {loading ? (
+            <div className="flex flex-col gap-2 p-4">
+              {[1, 2, 3, 4].map((n) => (
+                <div key={n} className="h-14 rounded-xl bg-outline-variant/30 animate-pulse" />
               ))}
-              {filtered.length === 0 && (
-                <tr>
-                  <td colSpan="7" className="px-5 py-12 text-center text-on-surface-variant">
-                    No complaints found matching your filters.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="text-center py-16 text-on-surface-variant">
+              <span className="material-symbols-outlined text-5xl mb-2">inbox</span>
+              <p className="text-sm">
+                {complaints.length === 0
+                  ? "No complaints filed yet."
+                  : "No complaints match your filters."}
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-surface-container border-b border-outline-variant">
+                  <tr>
+                    {["#", "Title", "Address", "Status", "Priority", "Filed", "Resolved", ""].map(
+                      (h) => (
+                        <th
+                          key={h}
+                          className="px-4 py-3 text-left text-xs font-semibold text-on-surface-variant"
+                        >
+                          {h}
+                        </th>
+                      )
+                    )}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-outline-variant">
+                  {filtered.map((c) => (
+                    <tr
+                      key={c.id}
+                      className="hover:bg-surface-container-high transition cursor-pointer"
+                      onClick={() => navigate(`/complaints/${c.id}`)}
+                    >
+                      <td className="px-4 py-3 font-mono text-xs text-on-surface-variant whitespace-nowrap">
+                        {c.complaint_number}
+                      </td>
+                      <td className="px-4 py-3 max-w-[200px]">
+                        <p className="truncate font-medium text-on-surface">{c.title}</p>
+                        {c.is_repeat_complaint && (
+                          <span className="text-xs text-red-600 font-semibold">Repeat complaint</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 max-w-[160px]">
+                        <p className="truncate text-on-surface-variant">
+                          {c.address_text || "—"}
+                        </p>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                            STATUS_COLOR[c.status] || "text-gray-600 bg-gray-50"
+                          }`}
+                        >
+                          {STATUS_LABEL[c.status] || c.status}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`text-xs capitalize ${PRIORITY_COLOR[c.priority] || ""}`}
+                        >
+                          {c.priority}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-on-surface-variant whitespace-nowrap">
+                        {formatDate(c.created_at)}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-on-surface-variant whitespace-nowrap">
+                        {c.resolved_at ? formatDate(c.resolved_at) : "—"}
+                      </td>
+                      <td className="px-4 py-3">
+                        <button
+                          className="text-primary text-xs hover:underline"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            navigate(`/complaints/${c.id}`);
+                          }}
+                        >
+                          View →
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
+
+        {!loading && (
+          <p className="text-xs text-on-surface-variant text-right">
+            Showing {filtered.length} of {complaints.length} complaints
+          </p>
+        )}
       </div>
     </AppLayout>
   );

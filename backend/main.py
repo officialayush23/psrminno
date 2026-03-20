@@ -1,7 +1,7 @@
 # backend/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routes import complaint_router, auth_router
+from routes import complaint_router, auth_router, stats_router
 
 
 app = FastAPI(
@@ -21,6 +21,7 @@ app.add_middleware(
 
 app.include_router(complaint_router.router)
 app.include_router(auth_router.router)
+app.include_router(stats_router.router)
 
 @app.get("/")
 def root():

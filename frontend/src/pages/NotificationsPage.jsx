@@ -1,162 +1,263 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
 import AppLayout from "../components/AppLayout";
+import { fetchMyComplaints } from "../api/complaintsApi";
 
-const MOCK_NOTIFICATIONS = [
-  {
-    id: "1",
-    type: "complaint",
-    icon: "assignment",
-    title: "Complaint #GR-2024-04821 Updated",
-    description: "Your drainage blockage complaint has moved to \"In Repair\" stage. Contractor has been notified.",
-    time: "2 hours ago",
-    read: false,
-  },
-  {
-    id: "2",
-    type: "alert",
-    icon: "warning",
-    title: "Water Supply Interruption – Rohini Sector 7-8",
-    description: "MCD scheduled maintenance. Expected restoration by 6 PM today.",
-    time: "5 hours ago",
-    read: false,
-  },
-  {
-    id: "3",
-    type: "survey",
-    icon: "rate_review",
-    title: "Feedback Request – Pothole Repair",
-    description: "Your complaint #GR-2024-03102 has been marked resolved. Please confirm if the issue is fixed.",
-    time: "1 day ago",
-    read: false,
-  },
-  {
-    id: "4",
-    type: "complaint",
-    icon: "assignment",
-    title: "Complaint #GR-2024-05119 Registered",
-    description: "Your broken streetlight complaint has been registered and assigned to the Electricity Department.",
-    time: "2 days ago",
-    read: true,
-  },
-  {
-    id: "5",
-    type: "alert",
-    icon: "info",
-    title: "Road Diversion – Sector 11",
-    description: "Temporary road diversion effective from tomorrow 8 AM due to sewer line repair.",
-    time: "3 days ago",
-    read: true,
-  },
-];
+const STATUS_LABEL = {
+  received: "Received",
+  clustered: "Clustered",
+  mapped: "Mapped",
+  workflow_started: "Workflow Started",
+  in_progress: "In Progress",
+  midway_survey_sent: "Survey Sent",
+  resolved: "Resolved",
+  closed: "Closed",
+  rejected: "Rejected",
+  escalated: "Escalated",
+  emergency: "Emergency",
+  constraint_blocked: "Blocked",
+};
 
-const TABS = ["All", "Unread", "Complaints", "Alerts", "Surveys"];
+const STATUS_ICON = {
+  received: "inbox",
+  in_progress: "construction",
+  resolved: "check_circle",
+  closed: "done_all",
+  rejected: "cancel",
+  escalated: "priority_high",
+  emergency: "emergency",
+  constraint_blocked: "block",
+  midway_survey_sent: "rate_review",
+  workflow_started: "play_circle",
+  mapped: "place",
+  clustered: "merge",
+};
+
+const ALERT_STEPS = new Set(["in_progress", "resolved", "closed", "rejected", "escalated", "emergency", "constraint_blocked", "midway_survey_sent", "workflow_started"]);
+
+function timeAgo(isoString) {
+  if (!isoString) return "";
+  const diff = Date.now() - new Date(isoString).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function complaintsToNotifications(complaints) {
+  const notifs = [];
+
+  for (const c of complaints) {
+    // Always add a "filed" notification
+    notifs.push({
+      id: `filed-${c.id}`,
+      complaint_id: c.id,
+      complaint_number: c.complaint_number,
+      title: c.title,
+      type: "complaint",
+      icon: "receipt_long",
+      message: `Complaint #${c.complaint_number} filed successfully.`,
+      timestamp: c.created_at,
+      read: true, // old ones assumed read
+    });
+
+    // Add a notification for any notable status
+    if (ALERT_STEPS.has(c.status)) {
+      notifs.push({
+        id: `status-${c.id}`,
+        complaint_id: c.id,
+        complaint_number: c.complaint_number,
+        title: c.title,
+        type: "complaint",
+        icon: STATUS_ICON[c.status] || "notifications",
+        message: `Complaint #${c.complaint_number} is now: ${STATUS_LABEL[c.status] || c.status}.`,
+        timestamp: c.updated_at || c.created_at,
+        read: ["resolved", "closed"].includes(c.status),
+      });
+    }
+
+    // "Survey" notification for resolved complaints
+    if (c.status === "resolved") {
+      notifs.push({
+        id: `survey-${c.id}`,
+        complaint_id: c.id,
+        complaint_number: c.complaint_number,
+        title: c.title,
+        type: "survey",
+        icon: "rate_review",
+        message: `Your complaint #${c.complaint_number} was resolved. Please provide feedback.`,
+        timestamp: c.resolved_at || c.updated_at,
+        read: false,
+      });
+    }
+  }
+
+  // Sort by timestamp descending
+  notifs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  return notifs;
+}
+
+const FILTER_TABS = ["All", "Unread", "Complaints", "Surveys"];
 
 export default function NotificationsPage() {
+  const [notifications, setNotifications] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState("All");
-  const [notifications, setNotifications] = useState(MOCK_NOTIFICATIONS);
+
+  useEffect(() => {
+    async function load() {
+      setLoading(true);
+      try {
+        const res = await fetchMyComplaints({ limit: 50 });
+        setNotifications(complaintsToNotifications(res.items || []));
+      } catch (e) {
+        setError("Failed to load notifications.");
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  function markAllRead() {
+    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+  }
+
+  function markRead(id) {
+    setNotifications((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, read: true } : n))
+    );
+  }
 
   const filtered = notifications.filter((n) => {
+    if (activeTab === "All") return true;
     if (activeTab === "Unread") return !n.read;
     if (activeTab === "Complaints") return n.type === "complaint";
-    if (activeTab === "Alerts") return n.type === "alert";
     if (activeTab === "Surveys") return n.type === "survey";
     return true;
   });
 
-  const markAllRead = () => {
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-  };
-
   const unreadCount = notifications.filter((n) => !n.read).length;
 
   return (
-    <AppLayout title="Notifications">
-      <nav className="flex items-center gap-2 text-xs text-on-surface-variant font-medium mb-6">
-        <Link to="/dashboard" className="hover:text-primary">Dashboard</Link>
-        <span className="material-symbols-outlined text-[14px]">chevron_right</span>
-        <span className="text-primary font-bold">Notifications</span>
-      </nav>
-
-      <div className="max-w-[800px]">
+    <AppLayout unreadCount={unreadCount}>
+      <div className="p-6 max-w-2xl mx-auto flex flex-col gap-5">
         {/* Header */}
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
-            <h3 className="font-headline font-bold text-xl text-on-surface">Notifications</h3>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-headline font-bold text-on-surface flex items-center gap-2">
+              <span className="material-symbols-outlined text-primary">notifications</span>
+              Notifications
+            </h1>
             {unreadCount > 0 && (
-              <span className="px-2 py-0.5 bg-error/10 text-error text-xs font-bold rounded-full">
+              <p className="text-sm text-on-surface-variant mt-0.5">
                 {unreadCount} unread
-              </span>
+              </p>
             )}
           </div>
-          <button onClick={markAllRead} className="text-xs font-bold text-primary hover:underline">
-            Mark all as read
-          </button>
+          {unreadCount > 0 && (
+            <button
+              onClick={markAllRead}
+              className="text-sm text-primary hover:underline"
+            >
+              Mark all as read
+            </button>
+          )}
         </div>
 
-        {/* Tabs */}
-        <div className="flex gap-1 mb-6 bg-surface-container-low rounded-lg p-1">
-          {TABS.map((tab) => (
+        {/* Filter Tabs */}
+        <div className="flex gap-1 bg-surface-container rounded-xl p-1">
+          {FILTER_TABS.map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${
+              className={`flex-1 text-sm py-1.5 rounded-lg font-medium transition ${
                 activeTab === tab
-                  ? "bg-white text-primary shadow-sm"
+                  ? "bg-surface text-on-surface shadow-sm"
                   : "text-on-surface-variant hover:text-on-surface"
               }`}
             >
               {tab}
+              {tab === "Unread" && unreadCount > 0 && (
+                <span className="ml-1.5 text-xs bg-primary text-on-primary rounded-full px-1.5 py-0.5">
+                  {unreadCount}
+                </span>
+              )}
             </button>
           ))}
         </div>
 
+        {error && (
+          <div className="bg-error/10 border border-error/30 rounded-xl p-4 text-error text-sm">
+            {error}
+          </div>
+        )}
+
         {/* Notification List */}
-        <div className="space-y-2">
-          {filtered.map((n) => (
-            <div
-              key={n.id}
-              className={`p-4 rounded-xl border transition-colors ${
-                n.read
-                  ? "bg-surface-container-lowest border-outline-variant/10"
-                  : "bg-primary/[0.03] border-l-4 border-primary border-t border-r border-b border-t-outline-variant/10 border-r-outline-variant/10 border-b-outline-variant/10"
-              }`}
-            >
-              <div className="flex gap-3">
-                <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
-                  n.type === "alert" ? "bg-error/10" : n.type === "survey" ? "bg-secondary-container/10" : "bg-primary/10"
-                }`}>
-                  <span className={`material-symbols-outlined text-lg ${
-                    n.type === "alert" ? "text-error" : n.type === "survey" ? "text-secondary" : "text-primary"
-                  }`}>{n.icon}</span>
+        <div className="flex flex-col gap-2">
+          {loading ? (
+            [1, 2, 3, 4].map((n) => (
+              <div key={n} className="h-20 rounded-2xl bg-outline-variant/30 animate-pulse" />
+            ))
+          ) : filtered.length === 0 ? (
+            <div className="text-center py-16 text-on-surface-variant">
+              <span className="material-symbols-outlined text-5xl mb-2">notifications_off</span>
+              <p className="text-sm">
+                {notifications.length === 0
+                  ? "No complaints filed yet — nothing to show."
+                  : "No notifications in this category."}
+              </p>
+            </div>
+          ) : (
+            filtered.map((n) => (
+              <div
+                key={n.id}
+                onClick={() => markRead(n.id)}
+                className={`relative flex items-start gap-4 p-4 rounded-2xl border cursor-pointer transition ${
+                  n.read
+                    ? "bg-surface-container-low border-outline-variant"
+                    : "bg-primary/5 border-primary/30 shadow-sm"
+                }`}
+              >
+                {!n.read && (
+                  <span className="absolute top-4 right-4 w-2 h-2 rounded-full bg-primary" />
+                )}
+                <div
+                  className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${
+                    n.type === "survey"
+                      ? "bg-orange-100 text-orange-600"
+                      : "bg-primary/10 text-primary"
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[20px]">{n.icon}</span>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-start justify-between gap-2">
-                    <p className={`text-sm leading-tight ${n.read ? "font-medium" : "font-bold"}`}>{n.title}</p>
-                    <span className="text-[10px] text-on-surface-variant whitespace-nowrap shrink-0">{n.time}</span>
-                  </div>
-                  <p className="text-xs text-on-surface-variant mt-1 leading-relaxed">{n.description}</p>
-                  {n.type === "survey" && !n.read && (
-                    <div className="flex gap-2 mt-3">
-                      <button className="px-3 py-1.5 bg-tertiary text-on-tertiary text-[10px] font-bold rounded-lg hover:opacity-90 transition-opacity">
-                        Confirm Resolved
-                      </button>
-                      <button className="px-3 py-1.5 bg-error/10 text-error text-[10px] font-bold rounded-lg hover:bg-error/20 transition-colors">
-                        Issue Not Fixed
-                      </button>
+                  <p className={`text-sm ${n.read ? "text-on-surface" : "font-semibold text-on-surface"}`}>
+                    {n.message}
+                  </p>
+                  <p className="text-xs text-on-surface-variant mt-0.5">{timeAgo(n.timestamp)}</p>
+                  {n.type === "survey" && (
+                    <div className="mt-2 flex gap-2">
+                      <span className="text-xs text-on-surface-variant italic">
+                        Feedback via WhatsApp/SMS when configured
+                      </span>
                     </div>
                   )}
                 </div>
               </div>
-            </div>
-          ))}
-          {filtered.length === 0 && (
-            <div className="text-center py-12 text-on-surface-variant">
-              <span className="material-symbols-outlined text-4xl mb-2 block opacity-30">notifications_off</span>
-              <p className="text-sm font-medium">No notifications in this category</p>
-            </div>
+            ))
           )}
         </div>
+
+        {!loading && notifications.length > 0 && (
+          <p className="text-xs text-on-surface-variant text-center">
+            Notifications are derived from your complaint history.
+            <br />
+            Push notifications (WhatsApp/SMS) activate when configured.
+          </p>
+        )}
       </div>
     </AppLayout>
   );
