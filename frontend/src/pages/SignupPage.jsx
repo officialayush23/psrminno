@@ -4,12 +4,12 @@ import { signup } from "../api/authApi";
 
 export default function SignupPage() {
   const navigate = useNavigate();
-  const [fullName, setFullName] = useState("");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [cityCode, setCityCode] = useState("DEL");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [fullName, setFullName]   = useState("");
+  const [email, setEmail]         = useState("");
+  const [password, setPassword]   = useState("");
+  const [cityCode, setCityCode]   = useState("DEL");
+  const [error, setError]         = useState("");
+  const [loading, setLoading]     = useState(false);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -18,18 +18,29 @@ export default function SignupPage() {
 
     try {
       const data = await signup({
-        full_name: fullName,
+        full_name:          fullName,
         email,
         password,
-        city_code: cityCode,
+        city_code:          cityCode,
         preferred_language: "hi",
       });
 
-      localStorage.setItem("token", data.access_token);
+      // data.user_id, data.role etc. — no access_token needed anymore,
+      // client.js gets a fresh Firebase token on every request automatically
       localStorage.setItem("auth_user", JSON.stringify(data));
-      navigate("/dashboard");
+      navigate("/submit");
     } catch (err) {
-      setError(err.response?.data?.detail || "Signup failed");
+      // Firebase-specific error codes
+      if (err.code === "auth/email-already-in-use") {
+        setError("This email is already registered. Please sign in.");
+      } else if (err.code === "auth/weak-password") {
+        setError("Password must be at least 6 characters.");
+      } else if (err.code === "auth/invalid-email") {
+        setError("Please enter a valid email address.");
+      } else {
+        // Backend errors (409 duplicate, 400 bad city, etc.)
+        setError(err.response?.data?.detail || err.message || "Signup failed.");
+      }
     } finally {
       setLoading(false);
     }
@@ -74,20 +85,14 @@ export default function SignupPage() {
               />
             </div>
 
-            <div className="space-y-2">
-              <label className="block text-[13px] font-semibold text-on-surface-variant uppercase tracking-wider" htmlFor="signupEmail">
-                Email Address
-              </label>
-              <input
-                id="signupEmail"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                className="w-full h-12 bg-transparent border-0 border-b border-outline-variant/30 focus:ring-0 focus:border-primary transition-all duration-300 px-4 text-[16px] placeholder:text-outline/50"
-                placeholder="you@example.com"
-              />
-            </div>
+        <label>
+          City Code
+          <input
+            value={cityCode}
+            onChange={(e) => setCityCode(e.target.value.toUpperCase())}
+            required
+          />
+        </label>
 
             <div className="space-y-2">
               <label className="block text-[13px] font-semibold text-on-surface-variant uppercase tracking-wider" htmlFor="signupPassword">
@@ -105,20 +110,9 @@ export default function SignupPage() {
               />
             </div>
 
-            <div className="space-y-2">
-              <label className="block text-[13px] font-semibold text-on-surface-variant uppercase tracking-wider" htmlFor="cityCode">
-                City Code
-              </label>
-              <input
-                id="cityCode"
-                type="text"
-                value={cityCode}
-                onChange={(e) => setCityCode(e.target.value.toUpperCase())}
-                required
-                className="w-full h-12 bg-transparent border-0 border-b border-outline-variant/30 focus:ring-0 focus:border-primary transition-all duration-300 px-4 text-[16px] placeholder:text-outline/50"
-                placeholder="DEL"
-              />
-            </div>
+        <button className="submit-btn-large" type="submit" disabled={loading}>
+          {loading ? "Creating account..." : "Create Account"}
+        </button>
 
             {error && (
               <div className="flex items-center gap-2 px-4 py-3 bg-error-container/50 rounded-lg">

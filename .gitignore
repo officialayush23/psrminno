@@ -26,6 +26,8 @@ backend/psrm/
 .env.*
 backend/.env
 frontend/.env
+**/.env
+**/.env.*
 
 # GCP / Cloud credentials — NEVER commit these
 gcs-service-account.json
@@ -33,6 +35,14 @@ gcs-service-account.json
 *-service-account.json
 *-credentials.json
 service-account-*.json
+service_account_key_*.json
+**/service_account_key_*.json
+storage_bucket.json
+**/storage_bucket.json
+serviceAccountKey.json
+**/serviceAccountKey.json
+certs.json
+**/certs.json
 
 # Node / frontend
 node_modules/

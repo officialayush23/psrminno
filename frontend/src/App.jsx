@@ -1,4 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
+import { auth } from "./firebase";
+import { useAuthState } from "react-firebase-hooks/auth";
 import AdminPage from "./pages/AdminPage";
 import ComplaintStatusPage from "./pages/ComplaintStatusPage";
 import DashboardPage from "./pages/DashboardPage";
@@ -9,6 +11,12 @@ import ProfilePage from "./pages/ProfilePage";
 import PublicMapPage from "./pages/PublicMapPage";
 import SignupPage from "./pages/SignupPage";
 import SubmitComplaintPage from "./pages/SubmitComplaintPage";
+
+function ProtectedRoute({ children }) {
+  const [user, loading] = useAuthState(auth);
+  if (loading) return <p style={{ padding: "2rem" }}>Loading...</p>;
+  return user ? children : <Navigate to="/login" replace />;
+}
 
 export default function App() {
   return (

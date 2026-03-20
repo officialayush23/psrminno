@@ -1,12 +1,11 @@
-import base64
-import hashlib
-import hmac
-import os
-import re
-from datetime import datetime, timedelta, timezone
+# backend/routes/auth_router.py
 
-import jwt
+import re
+from typing import Optional
+
+import firebase_admin
 from fastapi import APIRouter, Depends, HTTPException
+from firebase_admin import auth as firebase_auth, credentials
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -15,203 +14,239 @@ from config import settings
 from db import get_db
 from dependencies import get_current_user
 from models import City, User
-from schemas import AuthResponse, SignInRequest, SignUpRequest, TokenData
+from schemas import TokenData
+
+# ── Firebase app init (safe to call multiple times) ──────────────
+if not firebase_admin._apps:
+    cred = credentials.Certificate(settings.FIREBASE_SERVICE_ACCOUNT_PATH)
+    firebase_admin.initialize_app(cred)
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
-PASSWORD_ITERATIONS = 390000
-PASSWORD_REGEX = re.compile(r"^(?=.*[A-Za-z])(?=.*\d).{8,}$")
+# ── Request / Response schemas (local, auth-specific) ────────────
+
+class FirebaseTokenRequest(BaseModel):
+    """Sent by the frontend after Firebase signup or login."""
+    id_token:   str
+    full_name:  Optional[str] = None   # required on first signup, ignored on login
+    city_code:  Optional[str] = None   # optional; defaults to first city (Delhi)
+    preferred_language: Optional[str] = "hi"
 
 
-def _hash_password(password: str) -> str:
-    salt = os.urandom(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS)
-    return "pbkdf2_sha256${}${}${}".format(
-        PASSWORD_ITERATIONS,
-        base64.b64encode(salt).decode("ascii"),
-        base64.b64encode(digest).decode("ascii"),
+class AuthResponse(BaseModel):
+    user_id:    str
+    role:       str
+    email:      Optional[str]
+    phone:      Optional[str]
+    full_name:  str
+    city_id:    Optional[str]
+    is_new_user: bool          # lets the frontend know whether to show onboarding
+
+
+# ── Helpers ───────────────────────────────────────────────────────
+
+def _verify_firebase_token(id_token: str) -> dict:
+    """Verify Firebase ID token and return decoded claims."""
+    try:
+        return firebase_auth.verify_id_token(id_token)
+    except firebase_auth.ExpiredIdTokenError:
+        raise HTTPException(status_code=401, detail="Firebase token has expired")
+    except firebase_auth.InvalidIdTokenError:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail=f"Token verification failed: {exc}")
+
+
+def _resolve_city(db: Session, city_code: Optional[str]) -> City:
+    """Return the City row for the given code, or the first city if no code given."""
+    if city_code:
+        city = db.query(City).filter(City.city_code == city_code.strip().upper()).first()
+        if not city:
+            raise HTTPException(status_code=400, detail=f"Unknown city_code: {city_code}")
+        return city
+
+    city = db.query(City).order_by(City.created_at.asc()).first()
+    if not city:
+        raise HTTPException(status_code=500, detail="No cities configured in database")
+    return city
+
+
+def _provider_label(sign_in_provider: str) -> str:
+    """Map Firebase sign-in provider strings to your auth_provider column values."""
+    mapping = {
+        "password":    "password",
+        "phone":       "phone_otp",
+        "google.com":  "google",
+        "apple.com":   "apple",
+    }
+    return mapping.get(sign_in_provider, sign_in_provider)
+
+
+def _build_user_response(user: User, is_new: bool) -> AuthResponse:
+    return AuthResponse(
+        user_id=str(user.id),
+        role=user.role,
+        email=user.email,
+        phone=user.phone,
+        full_name=user.full_name,
+        city_id=str(user.city_id) if user.city_id else None,
+        is_new_user=is_new,
     )
 
 
-def _verify_password(password: str, stored: str) -> bool:
-    try:
-        algo, iteration_str, salt_b64, digest_b64 = stored.split("$", 3)
-        if algo != "pbkdf2_sha256":
-            return False
-        iterations = int(iteration_str)
-        salt = base64.b64decode(salt_b64.encode("ascii"))
-        expected = base64.b64decode(digest_b64.encode("ascii"))
-    except Exception:
-        return False
-
-    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
-    return hmac.compare_digest(actual, expected)
-
-
-def _issue_access_token(user: User) -> tuple[str, int]:
-    expires_seconds = settings.AUTH_ACCESS_TOKEN_EXPIRE_MINUTES * 60
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_seconds)
-    payload = {
-        "sub": str(user.id),
-        "role": user.role,
-        "email": user.email,
-        "type": "access",
-        "exp": int(expires_at.timestamp()),
-        "iat": int(datetime.now(timezone.utc).timestamp()),
-    }
-    token = jwt.encode(payload, settings.AUTH_JWT_SECRET, algorithm=settings.AUTH_JWT_ALGORITHM)
-    return token, expires_seconds
-
-
-def _resolve_city_id(db: Session, city_code: str | None):
-    if city_code:
-        city = db.query(City).filter(City.city_code == city_code.strip()).first()
-        if not city:
-            raise HTTPException(status_code=400, detail="Invalid city_code")
-        return city.id
-
-    first_city = db.query(City).order_by(City.created_at.asc()).first()
-    return first_city.id if first_city else None
-
-
-def _validate_password_strength(password: str) -> None:
-    if not PASSWORD_REGEX.match(password):
-        raise HTTPException(
-            status_code=400,
-            detail="Password must be at least 8 characters and include letters and numbers",
-        )
-
+# ── Routes ────────────────────────────────────────────────────────
 
 @router.post("/signup", response_model=AuthResponse)
-def signup(payload: SignUpRequest, db: Session = Depends(get_db)):
-    email = payload.email.strip().lower()
-    if not email:
-        raise HTTPException(status_code=400, detail="Email is required")
+def signup(payload: FirebaseTokenRequest, db: Session = Depends(get_db)):
+    """
+    Called by the frontend immediately after Firebase.createUserWithEmailAndPassword()
+    or any Firebase sign-up flow.
 
-    if db.query(User).filter(User.email == email).first():
-        raise HTTPException(status_code=409, detail="Email already registered")
+    Flow:
+      1. Frontend creates user in Firebase → gets Firebase ID token
+      2. Frontend POSTs id_token + full_name here
+      3. We verify the token, create the internal user row, return user info
 
-    _validate_password_strength(payload.password)
-    city_id = _resolve_city_id(db, payload.city_code)
-    password_hash = _hash_password(payload.password)
+    The Firebase ID token is then used as the Bearer token on all
+    subsequent requests — no separate JWT needed.
+    """
+    decoded      = _verify_firebase_token(payload.id_token)
+    firebase_uid = decoded["uid"]
+    email        = (decoded.get("email") or "").strip().lower() or None
+    phone        = decoded.get("phone_number") or None
+    provider     = _provider_label(decoded.get("firebase", {}).get("sign_in_provider", "password"))
+    display_name = (
+        payload.full_name
+        or decoded.get("name")
+        or email
+        or phone
+        or "Citizen"
+    ).strip()
+
+    # ── Idempotency: return existing user if already registered ──
+    existing = db.query(User).filter(User.auth_uid == firebase_uid).first()
+    if existing:
+        return _build_user_response(existing, is_new=False)
+
+    # ── Duplicate email guard (different Firebase account, same email) ──
+    if email and db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=409, detail="Email already registered with a different account")
+
+    city = _resolve_city(db, payload.city_code)
 
     user = User(
-        city_id=city_id,
-        email=email,
-        full_name=payload.full_name.strip(),
-        preferred_language=(payload.preferred_language or "hi").strip(),
-        role="citizen",
-        is_active=True,
-        is_verified=True,
-        auth_provider="password",
-        extra_meta={"password_hash": password_hash},
+        # ── Identity ─────────────────────────────────────────────
+        auth_uid          = firebase_uid,
+        auth_provider     = provider,
+
+        # ── Contact ──────────────────────────────────────────────
+        email             = email,
+        phone             = phone,
+        full_name         = display_name,
+
+        # ── Locale / preferences ─────────────────────────────────
+        preferred_language = (payload.preferred_language or "hi").strip(),
+
+        # ── City (required FK) ───────────────────────────────────
+        city_id           = city.id,
+
+        # ── Role & status ────────────────────────────────────────
+        role              = "citizen",
+        is_active         = True,
+        is_verified       = email is not None or phone is not None,
+
+        # ── Opt-ins ──────────────────────────────────────────────
+        twilio_opt_in     = True,
+        email_opt_in      = True,
+
+        # ── No password hash needed — Firebase owns credentials ──
+        extra_meta        = {},
     )
 
     db.add(user)
     db.commit()
     db.refresh(user)
 
-    token, expires_in = _issue_access_token(user)
-    return AuthResponse(
-        access_token=token,
-        expires_in=expires_in,
-        user_id=user.id,
-        role=user.role,
-        email=user.email or "",
-        full_name=user.full_name,
-    )
+    return _build_user_response(user, is_new=True)
 
 
-@router.post("/login")
-def login(payload: SignInRequest, db: Session = Depends(get_db)):
-    email = payload.email.strip().lower()
-    user = db.query(User).filter(User.email == email).first()
-    if not user or not user.is_active:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+@router.post("/login", response_model=AuthResponse)
+def login(payload: FirebaseTokenRequest, db: Session = Depends(get_db)):
+    """
+    Called by the frontend after Firebase.signInWithEmailAndPassword()
+    or any Firebase sign-in flow.
 
-    meta = user.extra_meta or {}
-    stored_hash = meta.get("password_hash") if isinstance(meta, dict) else None
-    if not stored_hash or not _verify_password(payload.password, stored_hash):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+    Flow:
+      1. Frontend signs in via Firebase → gets Firebase ID token
+      2. Frontend POSTs id_token here
+      3. We verify the token, fetch the internal user, return user info
 
-    token, expires_in = _issue_access_token(user)
-    return AuthResponse(
-        access_token=token,
-        expires_in=expires_in,
-        user_id=user.id,
-        role=user.role,
-        email=user.email or "",
-        full_name=user.full_name,
-    )
+    If the user somehow signed in via Firebase but has no internal record
+    (e.g. admin created them directly in Firebase console), we auto-create
+    their row here so login never fails for a valid Firebase user.
+    """
+    decoded      = _verify_firebase_token(payload.id_token)
+    firebase_uid = decoded["uid"]
+    email        = (decoded.get("email") or "").strip().lower() or None
+    phone        = decoded.get("phone_number") or None
+    provider     = _provider_label(decoded.get("firebase", {}).get("sign_in_provider", "password"))
+
+    user = db.query(User).filter(User.auth_uid == firebase_uid).first()
+
+    if not user:
+        # ── Auto-provision: valid Firebase user with no internal record ──
+        # This handles: users created in Firebase console, migrated users, etc.
+        city = _resolve_city(db, payload.city_code)
+        display_name = (
+            decoded.get("name") or email or phone or "Citizen"
+        ).strip()
+
+        user = User(
+            auth_uid           = firebase_uid,
+            auth_provider      = provider,
+            email              = email,
+            phone              = phone,
+            full_name          = display_name,
+            preferred_language = (payload.preferred_language or "hi").strip(),
+            city_id            = city.id,
+            role               = "citizen",
+            is_active          = True,
+            is_verified        = True,
+            twilio_opt_in      = True,
+            email_opt_in       = True,
+            extra_meta         = {},
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return _build_user_response(user, is_new=True)
+
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+
+    # ── Keep auth_provider in sync if user changed sign-in method ──
+    if user.auth_provider != provider:
+        user.auth_provider = provider
+        db.commit()
+
+    return _build_user_response(user, is_new=False)
 
 
 @router.get("/me")
-def me(current_user: TokenData = Depends(get_current_user), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == current_user.user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {
-        "user_id": str(user.id),
-        "email": user.email,
-        "full_name": user.full_name,
-        "phone": user.phone,
-        "role": user.role,
-        "preferred_language": user.preferred_language,
-        "email_opt_in": user.email_opt_in,
-        "twilio_opt_in": user.twilio_opt_in,
-        "is_active": user.is_active,
-    }
-
-
-class UpdateMeRequest(BaseModel):
-    full_name: Optional[str] = None
-    phone: Optional[str] = None
-    preferred_language: Optional[str] = None
-    email_opt_in: Optional[bool] = None
-    twilio_opt_in: Optional[bool] = None
-
-
-@router.patch("/me")
-def update_me(
-    payload: UpdateMeRequest,
+def me(
     current_user: TokenData = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     user = db.query(User).filter(User.id == current_user.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-
-    if payload.full_name is not None:
-        user.full_name = payload.full_name.strip()
-    if payload.phone is not None:
-        # Check uniqueness if phone is being set
-        phone_stripped = payload.phone.strip() or None
-        if phone_stripped:
-            existing = db.query(User).filter(
-                User.phone == phone_stripped,
-                User.id != current_user.user_id
-            ).first()
-            if existing:
-                raise HTTPException(status_code=409, detail="Phone already in use")
-        user.phone = phone_stripped
-    if payload.preferred_language is not None:
-        user.preferred_language = payload.preferred_language.strip()
-    if payload.email_opt_in is not None:
-        user.email_opt_in = payload.email_opt_in
-    if payload.twilio_opt_in is not None:
-        user.twilio_opt_in = payload.twilio_opt_in
-
-    user.updated_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(user)
-
     return {
-        "user_id": str(user.id),
-        "email": user.email,
-        "full_name": user.full_name,
-        "phone": user.phone,
-        "role": user.role,
-        "preferred_language": user.preferred_language,
-        "email_opt_in": user.email_opt_in,
-        "twilio_opt_in": user.twilio_opt_in,
+        "user_id":    str(user.id),
+        "email":      user.email,
+        "phone":      user.phone,
+        "full_name":  user.full_name,
+        "role":       user.role,
+        "city_id":    str(user.city_id) if user.city_id else None,
+        "is_active":  user.is_active,
+        "auth_provider": user.auth_provider,
     }

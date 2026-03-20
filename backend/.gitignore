@@ -1,10 +1,15 @@
 .env
+*.env
 
 # GCP / Cloud credentials — NEVER commit these
 gcs-service-account.json
 *-service-account.json
 *-credentials.json
 service-account-*.json
+service_account_key_*.json
+storage_bucket.json
+serviceAccountKey.json
+certs.json
 
 # Python bytecode and cache
 __pycache__/
