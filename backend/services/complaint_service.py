@@ -1,8 +1,10 @@
 import json
 import logging
 from typing import Dict, Iterable, List, Optional
+from uuid import UUID
 
 from google import genai
+from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -12,6 +14,72 @@ from services.embedding_service import create_complaint_embeddings
 from services.storage_service import save_embedding_artifact, save_upload
 
 logger = logging.getLogger(__name__)
+
+
+def get_complaint_by_id(
+    db: Session,
+    complaint_id: UUID,
+    current_user_id: UUID,
+    current_user_role: str,
+) -> Dict[str, object]:
+    row = db.execute(
+        text(
+            """
+            SELECT
+                id,
+                complaint_number,
+                citizen_id,
+                city_id,
+                jurisdiction_id,
+                infra_node_id,
+                workflow_instance_id,
+                title,
+                description,
+                original_language,
+                translated_description,
+                address_text,
+                images,
+                status,
+                priority,
+                is_repeat_complaint,
+                repeat_gap_days,
+                created_at,
+                updated_at
+            FROM complaints
+            WHERE id = CAST(:complaint_id AS uuid)
+              AND is_deleted = false
+            """
+        ),
+        {"complaint_id": str(complaint_id)},
+    ).mappings().first()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Complaint not found")
+
+    if current_user_role == "citizen" and str(row["citizen_id"]) != str(current_user_id):
+        raise HTTPException(status_code=403, detail="You are not allowed to view this complaint")
+
+    return {
+        "id": str(row["id"]),
+        "complaint_number": row["complaint_number"],
+        "citizen_id": str(row["citizen_id"]),
+        "city_id": str(row["city_id"]),
+        "jurisdiction_id": str(row["jurisdiction_id"]) if row["jurisdiction_id"] else None,
+        "infra_node_id": str(row["infra_node_id"]) if row["infra_node_id"] else None,
+        "workflow_instance_id": str(row["workflow_instance_id"]) if row["workflow_instance_id"] else None,
+        "title": row["title"],
+        "description": row["description"],
+        "original_language": row["original_language"],
+        "translated_description": row["translated_description"],
+        "address_text": row["address_text"],
+        "images": row["images"] or [],
+        "status": row["status"],
+        "priority": row["priority"],
+        "is_repeat_complaint": bool(row["is_repeat_complaint"]),
+        "repeat_gap_days": row["repeat_gap_days"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+    }
 
 
 def _vector_literal(values: Optional[Iterable[float]]) -> Optional[str]:

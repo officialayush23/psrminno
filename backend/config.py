@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     GCS_UPLOAD_PREFIX: str = "complaints"
     GCS_EMBEDDINGS_PREFIX: str = "embeddings"
     GCS_STRICT_MODE: bool = False
+    GCS_SERVICE_ACCOUNT_KEY_PATH: Optional[str] = None
+    GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = None
 
     class Config:
         env_file = ".env"

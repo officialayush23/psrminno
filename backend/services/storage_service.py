@@ -35,10 +35,20 @@ def _gcs_upload(content: bytes, filename: str, content_type: Optional[str]) -> s
     if not bucket_name:
         raise ValueError("GCS_BUCKET_NAME is not configured")
 
+    key_path = settings.GCS_SERVICE_ACCOUNT_KEY_PATH
+    if not key_path:
+        raise ValueError("GCS_SERVICE_ACCOUNT_KEY_PATH is not configured")
+
+    from google.oauth2 import service_account
+    credentials = service_account.Credentials.from_service_account_file(
+        key_path,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+
     suffix = Path(filename or "upload.bin").suffix
     object_name = f"{settings.GCS_UPLOAD_PREFIX}/{uuid4()}{suffix}"
 
-    client = storage.Client(project=settings.GCS_PROJECT_ID)
+    client = storage.Client(credentials=credentials, project=settings.GCS_PROJECT_ID)
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(object_name)
     blob.upload_from_string(content, content_type=content_type or "application/octet-stream")
@@ -51,7 +61,17 @@ def _gcs_upload_with_object_name(content: bytes, object_name: str, content_type:
     if not bucket_name:
         raise ValueError("GCS_BUCKET_NAME is not configured")
 
-    client = storage.Client(project=settings.GCS_PROJECT_ID)
+    key_path = settings.GCS_SERVICE_ACCOUNT_KEY_PATH
+    if not key_path:
+        raise ValueError("GCS_SERVICE_ACCOUNT_KEY_PATH is not configured")
+
+    from google.oauth2 import service_account
+    credentials = service_account.Credentials.from_service_account_file(
+        key_path,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+
+    client = storage.Client(credentials=credentials, project=settings.GCS_PROJECT_ID)
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(object_name)
     blob.upload_from_string(content, content_type=content_type or "application/octet-stream")
@@ -108,4 +128,55 @@ def save_embedding_artifact(complaint_id: str, payload: Dict[str, object]) -> Di
         "local_path": str(local_path),
         "url": str(local_path),
         "storage": "local",
+    }
+
+
+def generate_signed_upload_url(
+    complaint_id: str,
+    content_type: str = "image/jpeg",
+) -> Dict[str, str]:
+    """
+    Generate a signed URL for direct browser upload to GCS.
+    Returns both the signed upload URL (PUT) and the permanent public view URL.
+    """
+    allowed_types = ["image/jpeg", "image/png"]
+    if content_type not in allowed_types:
+        raise ValueError(f"Invalid content type: {content_type}. Allowed: {allowed_types}")
+
+    bucket_name = settings.GCS_BUCKET_NAME
+    if not bucket_name:
+        raise ValueError("GCS_BUCKET_NAME is not configured")
+
+    key_path = settings.GCS_SERVICE_ACCOUNT_KEY_PATH
+    if not key_path:
+        raise ValueError("GCS_SERVICE_ACCOUNT_KEY_PATH is not configured")
+
+    from google.oauth2 import service_account
+    credentials = service_account.Credentials.from_service_account_file(
+        key_path,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+
+    extension = "jpg" if content_type == "image/jpeg" else "png"
+    file_id = str(uuid4())
+    object_path = f"{settings.GCS_UPLOAD_PREFIX}/{complaint_id}/images/{file_id}.{extension}"
+
+    client = storage.Client(credentials=credentials, project=settings.GCS_PROJECT_ID)
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(object_path)
+
+    signed_url = blob.generate_signed_url(
+        version="v4",
+        expiration=900,
+        method="PUT",
+        content_type=content_type,
+        credentials=credentials,
+    )
+
+    public_url = f"https://storage.googleapis.com/{bucket_name}/{object_path}"
+
+    return {
+        "upload_url": signed_url,
+        "file_url": public_url,
+        "object_path": object_path,
     }

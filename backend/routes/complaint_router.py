@@ -1,16 +1,37 @@
+import json
+from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from db import get_db
 from dependencies import get_current_user
 from models import City, InfraType, User
 from schemas import ComplaintIngestRequest, ComplaintIngestResponse, TokenData
-from services.complaint_service import ingest_complaint as ingest_complaint_service
+from services.complaint_service import (
+    get_complaint_by_id as get_complaint_by_id_service,
+    ingest_complaint as ingest_complaint_service,
+)
+from services.storage_service import generate_signed_upload_url
 
 router = APIRouter(prefix="/complaints", tags=["Complaints"])
+
+
+@router.get("/{complaint_id}")
+def get_complaint_by_id(
+    complaint_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: TokenData = Depends(get_current_user),
+):
+    return get_complaint_by_id_service(
+        db=db,
+        complaint_id=complaint_id,
+        current_user_id=current_user.user_id,
+        current_user_role=current_user.role,
+    )
 
 @router.post("/ingest", response_model=ComplaintIngestResponse)
 async def ingest_complaint(
@@ -94,3 +115,60 @@ async def ingest_complaint(
     )
 
     return await ingest_complaint_service(db, request)
+
+
+@router.get("/complaints/upload-url")
+def get_upload_url(
+    complaint_id: str,
+    content_type: str = "image/jpeg",
+    db: Session = Depends(get_db),
+    current_user: TokenData = Depends(get_current_user),
+):
+    allowed_roles = ["citizen", "worker", "contractor"]
+    if current_user.role not in allowed_roles:
+        raise HTTPException(status_code=403, detail="Not allowed to upload images")
+
+    try:
+        result = generate_signed_upload_url(complaint_id, content_type)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return result
+
+
+@router.patch("/complaints/{complaint_id}/images")
+def append_complaint_image(
+    complaint_id: str,
+    file_url: str,
+    object_path: str,
+    content_type: str = "image/jpeg",
+    db: Session = Depends(get_db),
+    current_user: TokenData = Depends(get_current_user),
+):
+    new_image = {
+        "url": file_url,
+        "object_path": object_path,
+        "storage": "gcs",
+        "mime_type": content_type,
+        "uploaded_by": str(current_user.user_id),
+        "uploaded_at": datetime.utcnow().isoformat(),
+    }
+
+    db.execute(
+        text(
+            """
+            UPDATE complaints
+            SET images = images || :new_image::jsonb,
+                updated_at = now()
+            WHERE id = CAST(:complaint_id AS uuid)
+              AND is_deleted = false
+        """
+        ),
+        {
+            "complaint_id": complaint_id,
+            "new_image": json.dumps(new_image),
+        }
+    )
+    db.commit()
+
+    return {"message": "Image appended successfully", "image": new_image}
