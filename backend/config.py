@@ -1,7 +1,9 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     DATABASE_URL: str
     GEMINI_API_KEY: str
     NOMIC_API_KEY: str
@@ -20,8 +22,11 @@ class Settings(BaseSettings):
     GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = None
     FIREBASE_SERVICE_ACCOUNT_PATH: str = "serviceAccountKey.json"
     PUBSUB_ENABLED: bool = False
-
-    class Config:
-        env_file = ".env"
+    VERTEX_AI_LOCATION: str = "asia-south1"
+    SMTP_HOST:     Optional[str] = None
+    SMTP_PORT:     int           = 465
+    SMTP_USER:     Optional[str] = None
+    SMTP_PASSWORD: Optional[str] = None
+    GOOGLE_GEOCODING_API_KEY: Optional[str] = None
 
 settings = Settings()

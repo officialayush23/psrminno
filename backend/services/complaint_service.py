@@ -1,4 +1,5 @@
 # backend/services/complaint_service.py
+# backend/services/complaint_service.py
 
 import json
 import logging
@@ -13,6 +14,7 @@ from sqlalchemy.orm import Session
 from config import settings
 from schemas import ComplaintIngestRequest, ComplaintIngestResponse
 from services.embedding_service import create_complaint_embeddings
+from services.geocoding_service import reverse_geocode
 from services.mapping_service import map_complaint_to_departments
 from services.pubsub_service import publish_complaint_received
 from services.storage_service import save_embedding_artifact, save_upload
@@ -37,25 +39,22 @@ def _uuid_array_literal(values: Optional[List[str]]) -> str:
 
 
 def _translate_to_english(description: str, original_language: str) -> str:
-    """Translate complaint to English via Gemini. No-op if already English."""
+    """Translate complaint to English via Gemini 2.5 Flash. No-op if already English."""
     if original_language.lower().startswith("en"):
         return description
-
     try:
-        client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        prompt = (
+        client   = genai.Client(api_key=settings.GEMINI_API_KEY)
+        prompt   = (
             "Translate this complaint to English and return only translated text.\n"
-            f"Language: {original_language}\n"
-            f"Complaint: {description}"
+            f"Language: {original_language}\nComplaint: {description}"
         )
         response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
         translated = (response.text or "").strip()
         if translated:
             return translated
-        logger.warning("Gemini translation returned empty text; using original description")
+        logger.warning("Gemini translation returned empty text; using original")
     except Exception as exc:
-        logger.warning("Gemini translation failed; using original description: %s", exc)
-
+        logger.warning("Gemini translation failed; using original: %s", exc)
     return description
 
 
@@ -77,8 +76,8 @@ def _insert_domain_event(
             ) VALUES (
                 :event_type,
                 'complaint',
-                CAST(:entity_id   AS uuid),
-                CAST(:actor_id    AS uuid),
+                CAST(:entity_id    AS uuid),
+                CAST(:actor_id     AS uuid),
                 'user',
                 CAST(:complaint_id AS uuid),
                 CAST(:city_id      AS uuid),
@@ -155,7 +154,7 @@ def get_complaint_by_id(
     if current_user_role == "citizen" and str(row["citizen_id"]) != str(current_user_id):
         raise HTTPException(status_code=403, detail="You are not allowed to view this complaint")
 
-    # ── Resolve department names from agent_suggested_dept_ids ────
+    # ── Resolve department names ──────────────────────────────────
     dept_names = []
     if row["agent_suggested_dept_ids"]:
         dept_ids_str = "{" + ",".join(str(d) for d in row["agent_suggested_dept_ids"]) + "}"
@@ -172,7 +171,7 @@ def get_complaint_by_id(
             for d in dept_rows
         ]
 
-    # ── Load latest mapping confidence from agent_logs ────────────
+    # ── Latest mapping confidence ─────────────────────────────────
     agent_row = db.execute(
         text("""
             SELECT confidence_score, output_data, created_at
@@ -188,19 +187,16 @@ def get_complaint_by_id(
 
     mapping_confidence = None
     mapping_details    = []
-    mapping_authority  = None
     if agent_row:
         mapping_confidence = (
             float(agent_row["confidence_score"])
-            if agent_row["confidence_score"] is not None
-            else None
+            if agent_row["confidence_score"] is not None else None
         )
         output = agent_row["output_data"] or {}
         if isinstance(output, dict):
-            mapping_details   = output.get("mappings", [])
-        # authority is in input_data
-    
-    # Also get authority from domain_events DEPT_MAPPED payload
+            mapping_details = output.get("mappings", [])
+
+    # ── Mapping authority from domain_events ──────────────────────
     de_row = db.execute(
         text("""
             SELECT payload
@@ -212,10 +208,10 @@ def get_complaint_by_id(
         """),
         {"cid": str(complaint_id)},
     ).mappings().first()
-    if de_row and de_row["payload"]:
-        p = de_row["payload"]
-        if isinstance(p, dict):
-            mapping_authority = p.get("authority")
+
+    mapping_authority = None
+    if de_row and isinstance(de_row["payload"], dict):
+        mapping_authority = de_row["payload"].get("authority")
 
     return {
         "id":                     str(row["id"]),
@@ -233,6 +229,8 @@ def get_complaint_by_id(
         "description":            row["description"],
         "translated_description": row["translated_description"],
         "original_language":      row["original_language"],
+        # address_text is the single source of truth for human-readable location.
+        # Populated either from what user typed OR from reverse geocode at ingest.
         "address_text":           row["address_text"],
         "images":                 row["images"] or [],
         "voice_recording_url":    row["voice_recording_url"],
@@ -265,25 +263,22 @@ async def ingest_complaint(
     """
     Full ingestion pipeline:
       1.  Upload media to GCS / local
-      2.  Translate description (Gemini)
-      3.  Create embeddings (Nomic text + vision)
-      4.  fn_ingest_complaint — atomic SQL transaction
+      2.  Translate description (Gemini 2.5 Flash)
+      3.  Resolve address_text — user-provided OR reverse-geocoded from lat/lng
+      4.  Create embeddings (Nomic text + vision)
+      5.  fn_ingest_complaint — atomic SQL transaction
             • resolves jurisdiction (PostGIS)
             • finds / creates infra_node (geohash + proximity)
             • repeat-complaint check
-            • inserts complaint row
+            • inserts complaint row with address_text
             • inserts complaint_embeddings
             • maps to active workflow (if any)
             • writes COMPLAINT_RECEIVED domain_event
-      5.  Flush so mapping service can see the committed complaint row
-      6.  Department mapping (fn_route_complaint_authority + Groq)
-            • resolves authority: NDMC / MCD / PWD / DJB
-            • Groq maps to 1-N departments
-            • updates complaints.agent_suggested_dept_ids
-            • writes agent_logs + DEPT_MAPPED domain_event
-      7.  Save embedding artifact to GCS / local
-      8.  Pub/Sub publish + notification_logs (citizen receipt)
-      9.  Commit everything
+      6.  Flush so mapping service can see the committed complaint row
+      7.  Department mapping (fn_route_complaint_authority + Groq)
+      8.  Save embedding artifact
+      9.  Pub/Sub publish + notification_logs
+      10. Commit everything
     """
 
     # ── 1. Media upload ───────────────────────────────────────────
@@ -319,7 +314,22 @@ async def ingest_complaint(
         request.description, request.original_language
     )
 
-    # ── 3. Embeddings ─────────────────────────────────────────────
+    # ── 3. Resolve address_text ───────────────────────────────────
+    # address_text is the single human-readable location field.
+    # Priority:
+    #   a) User typed an address explicitly → use as-is
+    #   b) User didn't type → reverse geocode lat/lng via Google API
+    #   c) API unavailable / failed → leave as None (PostGIS location still stored)
+    resolved_address_text = request.address_text
+    if not resolved_address_text or not resolved_address_text.strip():
+        geocoded = reverse_geocode(request.lat, request.lng)
+        if geocoded:
+            resolved_address_text = geocoded
+            logger.info(
+                "address_text auto-filled via reverse geocode: %s", resolved_address_text
+            )
+
+    # ── 4. Embeddings ─────────────────────────────────────────────
     embeddings      = create_complaint_embeddings(translated_description, primary_image_local_path)
     text_embedding  = embeddings["text_embedding"]
     image_embedding = embeddings["image_embedding"]
@@ -327,7 +337,7 @@ async def ingest_complaint(
     if text_embedding is None:
         raise ValueError("Text embedding is required and cannot be null")
 
-    # ── 4. fn_ingest_complaint ────────────────────────────────────
+    # ── 5. fn_ingest_complaint ────────────────────────────────────
     params = {
         "p_citizen_id":               str(request.citizen_id),
         "p_city_id":                  str(request.city_id),
@@ -338,7 +348,7 @@ async def ingest_complaint(
         "p_translated_description":   translated_description,
         "p_lat":                      request.lat,
         "p_lng":                      request.lng,
-        "p_address_text":             request.address_text,
+        "p_address_text":             resolved_address_text,
         "p_images":                   json.dumps(images_payload),
         "p_voice_recording_url":      voice_recording_url,
         "p_voice_transcript":         request.voice_transcript,
@@ -398,54 +408,43 @@ async def ingest_complaint(
     citizen_id = str(request.citizen_id)
     city_id    = str(request.city_id)
 
-    # ── 4b. Extra domain events from the Python layer ─────────────
+    # ── 5b. Extra domain events ───────────────────────────────────
     base_payload = {
-        "complaint_id":        complaint_id,
-        "complaint_number":    complaint_number,
-        "infra_node_id":       infra_node_id,
+        "complaint_id":         complaint_id,
+        "complaint_number":     complaint_number,
+        "infra_node_id":        infra_node_id,
         "workflow_instance_id": workflow_instance_id,
-        "is_new_infra_node":   is_new_infra_node,
-        "is_repeat_complaint": is_repeat_complaint,
-        "repeat_gap_days":     repeat_gap_days,
-        "jurisdiction_id":     jurisdiction_id,
+        "is_new_infra_node":    is_new_infra_node,
+        "is_repeat_complaint":  is_repeat_complaint,
+        "repeat_gap_days":      repeat_gap_days,
+        "jurisdiction_id":      jurisdiction_id,
     }
 
     if workflow_instance_id is None:
         _insert_domain_event(
-            db,
-            event_type="WORKFLOW_INSTANCE_REQUIRED",
-            complaint_id=complaint_id,
-            citizen_id=citizen_id,
-            city_id=city_id,
-            payload=base_payload,
+            db, event_type="WORKFLOW_INSTANCE_REQUIRED",
+            complaint_id=complaint_id, citizen_id=citizen_id,
+            city_id=city_id, payload=base_payload,
         )
 
     if is_repeat_complaint:
         _insert_domain_event(
-            db,
-            event_type="REPEAT_COMPLAINT_NOTIFICATION_QUEUED",
-            complaint_id=complaint_id,
-            citizen_id=citizen_id,
-            city_id=city_id,
-            payload=base_payload,
+            db, event_type="REPEAT_COMPLAINT_NOTIFICATION_QUEUED",
+            complaint_id=complaint_id, citizen_id=citizen_id,
+            city_id=city_id, payload=base_payload,
         )
 
     if is_new_infra_node:
         _insert_domain_event(
-            db,
-            event_type="NEW_INFRA_NODE_DETECTED",
-            complaint_id=complaint_id,
-            citizen_id=citizen_id,
-            city_id=city_id,
-            payload=base_payload,
+            db, event_type="NEW_INFRA_NODE_DETECTED",
+            complaint_id=complaint_id, citizen_id=citizen_id,
+            city_id=city_id, payload=base_payload,
         )
 
-    # ── 5. Flush so mapping_service can see the complaint row ─────
-    # We flush (not commit) so the entire batch rolls back together
-    # if something later fails.
+    # ── 6. Flush so mapping_service can see the complaint row ─────
     db.flush()
 
-    # ── 6. Resolve infra type name + code for mapping ─────────────
+    # ── 7. Resolve infra type for mapping ─────────────────────────
     infra_row = db.execute(
         text("SELECT name, code FROM infra_types WHERE id = CAST(:id AS uuid)"),
         {"id": str(request.infra_type_id)},
@@ -453,7 +452,6 @@ async def ingest_complaint(
     infra_type_name = infra_row["name"] if infra_row else "Unknown infrastructure"
     infra_type_code = infra_row["code"] if infra_row else "ROAD"
 
-    # Resolve jurisdiction name for Groq context
     jurisdiction_name: Optional[str] = None
     if jurisdiction_id:
         jur_row = db.execute(
@@ -462,25 +460,25 @@ async def ingest_complaint(
         ).mappings().first()
         jurisdiction_name = jur_row["name"] if jur_row else None
 
-    # ── 7. Department mapping (authority → Groq) ──────────────────
+    # ── 8. Department mapping (authority → Groq) ──────────────────
     mapping_result = map_complaint_to_departments(
-    db,
-    complaint_id=complaint_id,
-    city_id=city_id,
-    title=request.title,
-    description=translated_description,
-    infra_type_id=str(request.infra_type_id),   # ← new
-    infra_type_code=infra_type_code,
-    infra_type_name=infra_type_name,
-    infra_node_id=infra_node_id,                # ← new (from fn_ingest_complaint return)
-    jurisdiction_name=jurisdiction_name,
-    lat=request.lat,
-    lng=request.lng,
-    road_name=request.address_text,
-)
+        db,
+        complaint_id=complaint_id,
+        city_id=city_id,
+        title=request.title,
+        description=translated_description,
+        infra_type_id=str(request.infra_type_id),
+        infra_type_code=infra_type_code,
+        infra_type_name=infra_type_name,
+        infra_node_id=infra_node_id,
+        jurisdiction_name=jurisdiction_name,
+        lat=request.lat,
+        lng=request.lng,
+        road_name=resolved_address_text,
+    )
 
-    # ── 8. Save embedding artifact ────────────────────────────────
-    embedding_artifact = save_embedding_artifact(
+    # ── 9. Save embedding artifact ────────────────────────────────
+    save_embedding_artifact(
         complaint_id,
         {
             "complaint_id":           complaint_id,
@@ -491,9 +489,7 @@ async def ingest_complaint(
         },
     )
 
-    # ── 9. Pub/Sub publish + notification_logs ────────────────────
-    # Writes pubsub_event_log + notification_logs (email + whatsapp)
-    # Failures here are logged but do NOT roll back the complaint.
+    # ── 10. Pub/Sub + notification_logs ───────────────────────────
     try:
         publish_complaint_received(
             db,
@@ -514,18 +510,18 @@ async def ingest_complaint(
             images=images_payload,
         )
     except Exception as exc:
-        # notification failure must never block complaint creation
         logger.error("publish_complaint_received failed for %s: %s", complaint_id, exc)
 
-    # ── 10. Single commit for everything ──────────────────────────
+    # ── 11. Commit ────────────────────────────────────────────────
     db.commit()
 
     logger.info(
-        "Complaint ingested: id=%s number=%s authority=%s depts=%s",
+        "Complaint ingested: id=%s number=%s authority=%s depts=%s address=%s",
         complaint_id,
         complaint_number,
         mapping_result.get("authority"),
         [m.get("dept_code") for m in mapping_result.get("mappings", [])],
+        resolved_address_text,
     )
 
     return ComplaintIngestResponse(

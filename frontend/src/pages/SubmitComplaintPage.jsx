@@ -1,24 +1,33 @@
+// src/pages/SubmitComplaintPage.jsx
+
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { MapContainer, Marker, TileLayer, useMapEvents } from "react-leaflet";
-import { submitComplaint } from "../api/complaintsApi";
+import {
+  submitComplaint,
+  fetchInfraTypes,
+  reverseGeocode,
+  forwardGeocode,
+} from "../api/complaintsApi";
 import AppLayout from "../components/AppLayout";
 import { toast } from "sonner";
 
 const markerIcon = new L.Icon({
-  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+  iconUrl:   "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
   shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
+  iconSize:  [25, 41],
+  iconAnchor:[12, 41],
 });
 
-function LocationPicker({ lat, lng, setLat, setLng }) {
+// ── Leaflet click-to-pin ──────────────────────────────────────────
+function LocationPicker({ lat, lng, setLat, setLng, onPin }) {
   const map = useMapEvents({
-    click(e) {
+    async click(e) {
       setLat(e.latlng.lat);
       setLng(e.latlng.lng);
+      if (onPin) onPin(e.latlng.lat, e.latlng.lng);
     },
   });
 
@@ -33,40 +42,113 @@ function LocationPicker({ lat, lng, setLat, setLng }) {
   ) : null;
 }
 
+// ── Step indicator ────────────────────────────────────────────────
+function StepDot({ n, active, done }) {
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all ${
+        done   ? "bg-green-500 text-white" :
+        active ? "bg-primary text-on-primary ring-4 ring-primary/20" :
+                 "bg-surface-container border border-outline-variant text-on-surface-variant"
+      }`}>
+        {done ? <span className="material-symbols-outlined text-[14px]">check</span> : n}
+      </div>
+    </div>
+  );
+}
+
+// ── Main page ─────────────────────────────────────────────────────
 export default function SubmitComplaintPage() {
-  const navigate = useNavigate();
+  const navigate     = useNavigate();
   const fileInputRef = useRef(null);
-  const videoRef = useRef(null);
+  const videoRef     = useRef(null);
 
-  const [text, setText] = useState("");
-  const [lat, setLat] = useState(null);
-  const [lng, setLng] = useState(null);
-  const [locationStatus, setLocationStatus] = useState("Waiting for GPS permission...");
+  // Step — 1:photo, 2:location, 3:infra-type, 4:description
+  const [step, setStep] = useState(1);
 
-  const [image, setImage] = useState(null);
-  const [imagePreview, setImagePreview] = useState(null);
+  // Photo
+  const [image,          setImage]          = useState(null);
+  const [imagePreview,   setImagePreview]   = useState(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
 
+  // Location
+  const [lat,             setLat]             = useState(null);
+  const [lng,             setLng]             = useState(null);
+  const [locationStatus,  setLocationStatus]  = useState("Waiting for GPS…");
+
+  // Address — single field, populated from user input OR reverse geocode
+  const [addressText,    setAddressText]    = useState("");
+  const [addressLoading, setAddressLoading] = useState(false);
+
+  // Forward geocode search (address → pin)
+  const [addressSearch,  setAddressSearch]  = useState("");
+  const [searchLoading,  setSearchLoading]  = useState(false);
+
+  // Infra type
+  const [infraTypes,        setInfraTypes]        = useState([]);
+  const [infraTypesLoading, setInfraTypesLoading] = useState(true);
+  const [selectedInfraId,   setSelectedInfraId]   = useState(""); // UUID | "other" | "ai"
+  const [customInfraName,   setCustomInfraName]   = useState("");
+
+  // Description
+  const [text,         setText]         = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // ── Load infra types ─────────────────────────────────────────
+  useEffect(() => {
+    fetchInfraTypes()
+      .then(setInfraTypes)
+      .catch(() => toast.error("Could not load issue types — you can still submit."))
+      .finally(() => setInfraTypesLoading(false));
+  }, []);
+
+  // ── Helpers ──────────────────────────────────────────────────
+  const isKnownType = selectedInfraId && selectedInfraId !== "other" && selectedInfraId !== "ai";
+  const isOtherType = selectedInfraId === "other";
+  const isAiInfer   = selectedInfraId === "ai" || selectedInfraId === "";
+
+  // ── Reverse geocode a location and fill addressText ──────────
+  const doReverseGeocode = async (lat, lng) => {
+    setAddressLoading(true);
+    const addr = await reverseGeocode(lat, lng);
+    if (addr) setAddressText(addr);
+    setAddressLoading(false);
+  };
+
+  // ── GPS ──────────────────────────────────────────────────────
   const requestCurrentLocation = () => {
     if (!navigator.geolocation) {
       setLocationStatus("Geolocation not supported. Pin on map.");
       return;
     }
-
-    setLocationStatus("Fetching current location...");
+    setLocationStatus("Fetching location…");
     navigator.geolocation.getCurrentPosition(
-      (position) => {
-        setLat(position.coords.latitude);
-        setLng(position.coords.longitude);
+      (pos) => {
+        const { latitude, longitude } = pos.coords;
+        setLat(latitude);
+        setLng(longitude);
         setLocationStatus("Location fetched via GPS.");
+        doReverseGeocode(latitude, longitude);
       },
-      () => {
-        setLocationStatus("GPS failed or denied. Pin on map.");
-      },
+      () => setLocationStatus("GPS failed or denied. Pin on map."),
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     );
+  };
+
+  // ── Forward geocode search ────────────────────────────────────
+  const handleAddressSearch = async () => {
+    if (!addressSearch.trim()) return;
+    setSearchLoading(true);
+    const result = await forwardGeocode(addressSearch);
+    if (result) {
+      setLat(result.lat);
+      setLng(result.lng);
+      setAddressText(result.formatted);
+      setLocationStatus("Location set from address search.");
+    } else {
+      toast.error("Address not found. Try a more specific location.");
+    }
+    setSearchLoading(false);
   };
 
   useEffect(() => {
@@ -74,12 +156,7 @@ export default function SubmitComplaintPage() {
     return () => stopCamera();
   }, []);
 
-  useEffect(() => {
-    if (lat !== null && lng !== null && locationStatus.includes("Pin")) {
-      setLocationStatus("Location pinned on map.");
-    }
-  }, [lat, lng, locationStatus]);
-
+  // ── Camera ───────────────────────────────────────────────────
   const startCamera = async () => {
     setIsCameraActive(true);
     setImage(null);
@@ -89,28 +166,26 @@ export default function SubmitComplaintPage() {
         video: { facingMode: "environment" },
       });
       if (videoRef.current) videoRef.current.srcObject = stream;
-    } catch (err) {
-      console.error(err);
-      toast.error("Webcam access denied or unavailable.");
+    } catch {
+      toast.error("Camera access denied.");
       setIsCameraActive(false);
     }
   };
 
   const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
-    }
+    if (videoRef.current?.srcObject)
+      videoRef.current.srcObject.getTracks().forEach(t => t.stop());
     setIsCameraActive(false);
   };
 
   const capturePhoto = () => {
     if (!videoRef.current) return;
-    const video = videoRef.current;
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-    canvas.toBlob((blob) => {
+    const v = videoRef.current;
+    const c = document.createElement("canvas");
+    c.width = v.videoWidth;
+    c.height = v.videoHeight;
+    c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+    c.toBlob(blob => {
       if (!blob) return;
       const file = new File([blob], "webcam_photo.jpg", { type: "image/jpeg" });
       setImage(file);
@@ -119,7 +194,7 @@ export default function SubmitComplaintPage() {
     }, "image/jpeg");
   };
 
-  const handleFileUpload = (e) => {
+  const handleFileUpload = e => {
     const file = e.target.files?.[0];
     if (file) {
       setImage(file);
@@ -134,43 +209,45 @@ export default function SubmitComplaintPage() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  const openImageSourcePicker = () => {
-    toast("Choose photo source", {
-      action: {
-        label: "Use Webcam",
-        onClick: () => startCamera(),
-      },
-      cancel: {
-        label: "Upload File",
-        onClick: () => fileInputRef.current?.click(),
-      },
-    });
-  };
+  // ── Validation ───────────────────────────────────────────────
+  const canProceedStep1 = !!image;
+  const canProceedStep2 = lat !== null && lng !== null;
+  const canProceedStep3 = selectedInfraId !== "" &&
+    (selectedInfraId !== "other" || customInfraName.trim().length >= 3);
+  const canSubmit = canProceedStep1 && canProceedStep2 && canProceedStep3 &&
+    text.trim().length >= 5;
 
-  const handleSubmit = async (event) => {
-    event.preventDefault();
-    if (!image) {
-      toast.error("Please take a photo or upload an image.");
-      return;
-    }
-    if (lat === null || lng === null) {
-      toast.error("Location is required. Allow GPS or pin on map.");
-      return;
-    }
+  // ── Submit ───────────────────────────────────────────────────
+  const handleSubmit = async e => {
+    e.preventDefault();
+    if (!canSubmit) { toast.error("Please complete all steps."); return; }
+
     setIsSubmitting(true);
     try {
-      const complaint = await submitComplaint({ text: text || "Issue observed at location", lat, lng, image });
+      const complaint = await submitComplaint({
+        text:                text.trim() || "Issue observed at location",
+        lat,
+        lng,
+        image,
+        addressText:         addressText.trim() || undefined,
+        infraTypeId:         isKnownType ? selectedInfraId : undefined,
+        customInfraTypeName: isOtherType ? customInfraName.trim() : undefined,
+        // else: AI infers
+      });
+      toast.success("Complaint submitted!");
       navigate(`/complaints/${complaint.complaint_id}`);
     } catch (err) {
-      toast.error(err.response?.data?.detail || "Complaint submission failed");
+      toast.error(err.response?.data?.detail || "Submission failed. Try again.");
     } finally {
       setIsSubmitting(false);
     }
   };
 
+  // ── Render ───────────────────────────────────────────────────
   return (
     <AppLayout title="Report Issue">
-      <form onSubmit={handleSubmit} className="space-y-6 max-w-[900px]">
+      <form onSubmit={handleSubmit} className="space-y-6 max-w-[860px] pb-10">
+
         {/* Breadcrumb */}
         <nav className="flex items-center gap-2 text-xs text-on-surface-variant font-medium">
           <span>Dashboard</span>
@@ -178,23 +255,54 @@ export default function SubmitComplaintPage() {
           <span className="text-primary font-bold">Report Issue</span>
         </nav>
 
-        <h3 className="font-headline font-bold text-xl text-on-surface">
-          Report a New Civic Issue
-        </h3>
+        <h3 className="font-headline font-bold text-xl text-on-surface">Report a Civic Issue</h3>
 
-        {/* Two-panel grid: Photo + Map */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* Photo Panel */}
-          <div className="bg-surface-container-lowest rounded-xl border border-outline-variant/10 overflow-hidden shadow-sm">
-            <div className="relative h-[280px] bg-surface-container-low flex items-center justify-center">
+        {/* Step bar */}
+        <div className="flex items-center gap-0">
+          {["Photo", "Location", "Issue Type", "Description"].map((label, i) => (
+            <React.Fragment key={label}>
+              <button
+                type="button"
+                onClick={() => setStep(i + 1)}
+                className="flex flex-col items-center gap-1 flex-shrink-0"
+              >
+                <StepDot
+                  n={i + 1}
+                  active={step === i + 1}
+                  done={
+                    (i === 0 && canProceedStep1) ||
+                    (i === 1 && canProceedStep2) ||
+                    (i === 2 && canProceedStep3)
+                  }
+                />
+                <span className={`text-[10px] font-semibold hidden sm:block ${
+                  step === i + 1 ? "text-primary" : "text-on-surface-variant"
+                }`}>{label}</span>
+              </button>
+              {i < 3 && <div className="flex-1 h-px bg-outline-variant mx-1 mb-4" />}
+            </React.Fragment>
+          ))}
+        </div>
+
+        {/* ── STEP 1: Photo ── */}
+        {step === 1 && (
+          <div className="bg-surface-container-lowest rounded-xl border border-outline-variant/10 overflow-hidden shadow-sm animate-in fade-in">
+            <div className="px-5 pt-5 pb-3">
+              <p className="text-sm font-semibold text-on-surface">Take or upload a photo</p>
+              <p className="text-xs text-on-surface-variant mt-0.5">Photo helps officials assess severity faster</p>
+            </div>
+
+            <div className="relative h-[300px] bg-surface-container-low flex items-center justify-center mx-5 mb-5 rounded-xl overflow-hidden border border-outline-variant/10">
               {isCameraActive ? (
                 <>
                   <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
-                  <div className="absolute top-3 left-1/2 -translate-x-1/2 flex gap-2 z-10">
-                    <button type="button" onClick={capturePhoto} className="px-4 py-2 bg-primary text-on-primary rounded-lg text-sm font-bold shadow-lg">
+                  <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-2 z-10">
+                    <button type="button" onClick={capturePhoto}
+                      className="px-5 py-2 bg-primary text-on-primary rounded-full text-sm font-bold shadow-lg">
                       Capture
                     </button>
-                    <button type="button" onClick={stopCamera} className="px-4 py-2 bg-outline text-white rounded-lg text-sm font-bold shadow-lg">
+                    <button type="button" onClick={stopCamera}
+                      className="px-4 py-2 bg-surface/80 backdrop-blur text-on-surface rounded-full text-sm font-bold">
                       Cancel
                     </button>
                   </div>
@@ -202,90 +310,328 @@ export default function SubmitComplaintPage() {
               ) : imagePreview ? (
                 <>
                   <img src={imagePreview} alt="Preview" className="w-full h-full object-cover" />
-                  <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10">
-                    <button type="button" onClick={clearPhoto} className="px-4 py-2 bg-primary text-on-primary rounded-lg text-sm font-bold shadow-lg">
-                      Retake / Clear
-                    </button>
-                  </div>
+                  <button type="button" onClick={clearPhoto}
+                    className="absolute top-3 right-3 px-3 py-1.5 bg-surface/80 backdrop-blur text-on-surface rounded-full text-xs font-bold">
+                    ✕ Remove
+                  </button>
                 </>
               ) : (
-                <div
-                  className="flex flex-col items-center gap-3 cursor-pointer group"
-                  onClick={openImageSourcePicker}
-                >
-                  <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center group-hover:bg-primary/20 transition-colors">
-                    <span className="material-symbols-outlined text-primary text-3xl">photo_camera</span>
+                <div className="flex flex-col items-center gap-4">
+                  <div className="w-20 h-20 rounded-full bg-primary/10 flex items-center justify-center">
+                    <span className="material-symbols-outlined text-primary text-4xl">photo_camera</span>
                   </div>
-                  <span className="text-sm font-medium text-on-surface-variant">Tap to upload or take photo</span>
+                  <div className="flex gap-3">
+                    <button type="button" onClick={startCamera}
+                      className="px-4 py-2 bg-primary text-on-primary rounded-full text-sm font-bold">
+                      Use Camera
+                    </button>
+                    <button type="button" onClick={() => fileInputRef.current?.click()}
+                      className="px-4 py-2 bg-surface-container border border-outline-variant text-on-surface rounded-full text-sm font-bold">
+                      Upload File
+                    </button>
+                  </div>
                 </div>
               )}
               <input type="file" accept="image/*" ref={fileInputRef} className="hidden" onChange={handleFileUpload} />
             </div>
-            <div className="px-4 py-3 border-t border-outline-variant/10">
-              <p className="text-xs font-medium text-on-surface-variant text-center">
-                {image ? `✓ Photo attached: ${image.name}` : "Photo required — shows issue to officials"}
-              </p>
-            </div>
-          </div>
 
-          {/* Location Panel */}
-          <div className="bg-surface-container-lowest rounded-xl border border-outline-variant/10 overflow-hidden shadow-sm">
-            <div className="relative h-[280px]" style={{ zIndex: 1 }}>
-              <MapContainer
-                center={lat !== null && lng !== null ? [lat, lng] : [28.6139, 77.209]}
-                zoom={14}
-                scrollWheelZoom={true}
-                style={{ height: "100%", width: "100%" }}
+            <div className="px-5 pb-5">
+              <button
+                type="button"
+                disabled={!canProceedStep1}
+                onClick={() => setStep(2)}
+                className="w-full py-3 bg-primary text-on-primary rounded-xl text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                <TileLayer
-                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                  attribution='&copy; <a href="https://osm.org/copyright">OSM</a>'
-                />
-                <LocationPicker lat={lat} lng={lng} setLat={setLat} setLng={setLng} />
-              </MapContainer>
-            </div>
-            <div className="px-4 py-3 border-t border-outline-variant/10 flex items-center justify-between">
-              <div className="text-xs text-on-surface-variant">
-                <p className="font-medium">{locationStatus}</p>
-                {lat !== null && lng !== null && (
-                  <p className="font-mono text-[10px] mt-0.5">{lat.toFixed(6)}, {lng.toFixed(6)}</p>
-                )}
-              </div>
-              <button type="button" onClick={requestCurrentLocation} className="px-3 py-1.5 bg-primary/10 text-primary text-xs font-bold rounded-lg hover:bg-primary/20 transition-colors">
-                <span className="material-symbols-outlined text-sm mr-1">my_location</span>
-                GPS
+                {canProceedStep1 ? "Next — Set Location →" : "Photo required to continue"}
               </button>
             </div>
           </div>
-        </div>
+        )}
 
-        {/* Description */}
-        <div className="bg-surface-container-lowest rounded-xl border border-outline-variant/10 p-5 shadow-sm">
-          <label className="block text-[13px] font-semibold text-on-surface-variant uppercase tracking-wider mb-3">
-            Describe the issue
-          </label>
-          <textarea
-            className="w-full h-[120px] bg-surface-container-low border border-outline-variant/20 rounded-lg px-4 py-3 text-sm font-body resize-vertical focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="E.g. Broken streetlight near the main market, dark at night..."
-            required
-          />
-          <p className="text-[10px] text-on-surface-variant mt-2">
-            <span className="material-symbols-outlined text-[12px] mr-1">translate</span>
-            Supports Hindi, English, and 20+ Indian languages via Bhashini
-          </p>
-        </div>
+        {/* ── STEP 2: Location ── */}
+        {step === 2 && (
+          <div className="bg-surface-container-lowest rounded-xl border border-outline-variant/10 overflow-hidden shadow-sm animate-in fade-in">
+            <div className="px-5 pt-5 pb-3 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-semibold text-on-surface">Where is the issue?</p>
+                <p className="text-xs text-on-surface-variant mt-0.5">Allow GPS, tap on map, or search by address</p>
+              </div>
+              <button type="button" onClick={requestCurrentLocation}
+                className="flex items-center gap-1 px-3 py-1.5 bg-primary/10 text-primary text-xs font-bold rounded-full">
+                <span className="material-symbols-outlined text-[14px]">my_location</span>
+                Use GPS
+              </button>
+            </div>
 
-        {/* Submit Button */}
-        <button
-          type="submit"
-          disabled={isSubmitting}
-          className="w-full flex items-center justify-center gap-2 bg-primary text-on-primary py-3.5 rounded-lg font-bold text-sm shadow-lg shadow-primary/20 hover:bg-primary-container hover:text-on-primary-container transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <span className="material-symbols-outlined text-lg">send</span>
-          {isSubmitting ? "Submitting..." : "Submit Complaint"}
-        </button>
+            {/* Address search bar */}
+            <div className="px-5 pb-3 flex gap-2">
+              <input
+                type="text"
+                value={addressSearch}
+                onChange={e => setAddressSearch(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && handleAddressSearch()}
+                placeholder="Search address or landmark…"
+                className="flex-1 px-3 py-2 rounded-xl border border-outline-variant bg-surface-container-low text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary"
+              />
+              <button
+                type="button"
+                onClick={handleAddressSearch}
+                disabled={searchLoading || !addressSearch.trim()}
+                className="px-4 py-2 bg-primary text-on-primary rounded-xl text-sm font-bold disabled:opacity-40"
+              >
+                {searchLoading ? "…" : "Find"}
+              </button>
+            </div>
+
+            {/* Map */}
+            <div className="mx-5 rounded-xl overflow-hidden border border-outline-variant/10" style={{ height: 280 }}>
+              <MapContainer
+                center={lat !== null ? [lat, lng] : [28.6139, 77.209]}
+                zoom={14}
+                scrollWheelZoom
+                style={{ height: "100%", width: "100%" }}
+              >
+                <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                <LocationPicker
+                  lat={lat} lng={lng}
+                  setLat={setLat} setLng={setLng}
+                  onPin={(lat, lng) => {
+                    setLocationStatus("Location pinned on map.");
+                    doReverseGeocode(lat, lng);
+                  }}
+                />
+              </MapContainer>
+            </div>
+
+            {/* Address field */}
+            <div className="px-5 pt-3 pb-2">
+              <div className="flex items-center gap-1.5 mb-1">
+                <span className="material-symbols-outlined text-[14px] text-on-surface-variant">location_on</span>
+                <p className="text-xs font-semibold text-on-surface-variant">Address</p>
+                {addressLoading && (
+                  <span className="text-[10px] text-primary animate-pulse">Detecting…</span>
+                )}
+              </div>
+              <input
+                type="text"
+                value={addressText}
+                onChange={e => setAddressText(e.target.value)}
+                placeholder="Auto-filled from GPS · Edit if needed"
+                className="w-full px-3 py-2 rounded-xl border border-outline-variant bg-surface-container-low text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary"
+              />
+              <p className="text-[10px] text-on-surface-variant mt-1">
+                Helps officials and workers find the exact location · Optional but recommended
+              </p>
+            </div>
+
+            {/* Coords */}
+            <div className="px-5 py-2">
+              <p className="text-xs text-on-surface-variant font-medium">{locationStatus}</p>
+              {lat !== null && (
+                <p className="font-mono text-[10px] text-on-surface-variant mt-0.5">
+                  {lat.toFixed(5)}, {lng.toFixed(5)}
+                </p>
+              )}
+            </div>
+
+            <div className="px-5 pb-5 flex gap-3">
+              <button type="button" onClick={() => setStep(1)}
+                className="px-5 py-3 bg-surface-container border border-outline-variant text-on-surface rounded-xl text-sm font-bold">
+                ← Back
+              </button>
+              <button
+                type="button"
+                disabled={!canProceedStep2}
+                onClick={() => setStep(3)}
+                className="flex-1 py-3 bg-primary text-on-primary rounded-xl text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {canProceedStep2 ? "Next — Issue Type →" : "Pin location to continue"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── STEP 3: Infra Type ── */}
+        {step === 3 && (
+          <div className="bg-surface-container-lowest rounded-xl border border-outline-variant/10 p-5 shadow-sm animate-in fade-in">
+            <p className="text-sm font-semibold text-on-surface mb-1">What type of issue is it?</p>
+            <p className="text-xs text-on-surface-variant mb-4">
+              Helps route to the right department. Skip if unsure — AI will classify it.
+            </p>
+
+            {infraTypesLoading ? (
+              <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                {Array(8).fill(0).map((_, i) => (
+                  <div key={i} className="h-20 rounded-xl bg-outline-variant/20 animate-pulse" />
+                ))}
+              </div>
+            ) : (
+              <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                {/* Known types from DB */}
+                {infraTypes.map(it => {
+                  const meta     = it.metadata || {};
+                  const selected = selectedInfraId === it.id;
+                  return (
+                    <button
+                      key={it.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedInfraId(selected ? "" : it.id);
+                        setCustomInfraName("");
+                      }}
+                      className={`flex flex-col items-center gap-1.5 p-3 rounded-xl border text-xs font-medium transition-all ${
+                        selected
+                          ? "border-primary bg-primary/10 text-primary shadow-sm"
+                          : "border-outline-variant bg-surface-container text-on-surface-variant hover:bg-surface-container-high"
+                      }`}
+                    >
+                      <span className="text-2xl">{meta.icon || "📍"}</span>
+                      <span className="text-center leading-tight text-[11px]">{it.name}</span>
+                    </button>
+                  );
+                })}
+
+                {/* Something Else */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedInfraId("other")}
+                  className={`flex flex-col items-center gap-1.5 p-3 rounded-xl border text-xs font-medium transition-all ${
+                    isOtherType
+                      ? "border-orange-400 bg-orange-50 text-orange-600 shadow-sm"
+                      : "border-outline-variant bg-surface-container text-on-surface-variant hover:bg-surface-container-high"
+                  }`}
+                >
+                  <span className="text-2xl">🔧</span>
+                  <span className="text-center leading-tight text-[11px]">Something Else</span>
+                </button>
+
+                {/* Let AI Decide */}
+                <button
+                  type="button"
+                  onClick={() => { setSelectedInfraId("ai"); setCustomInfraName(""); }}
+                  className={`flex flex-col items-center gap-1.5 p-3 rounded-xl border text-xs font-medium transition-all ${
+                    isAiInfer
+                      ? "border-violet-400 bg-violet-50 text-violet-600 shadow-sm"
+                      : "border-outline-variant bg-surface-container text-on-surface-variant hover:bg-surface-container-high"
+                  }`}
+                >
+                  <span className="text-2xl">🤖</span>
+                  <span className="text-center leading-tight text-[11px]">Let AI Decide</span>
+                </button>
+              </div>
+            )}
+
+            {/* Custom type input */}
+            {isOtherType && (
+              <div className="mt-4 animate-in slide-in-from-top-2">
+                <label className="block text-xs font-semibold text-on-surface-variant mb-2">
+                  Describe the infrastructure type
+                </label>
+                <input
+                  type="text"
+                  value={customInfraName}
+                  onChange={e => setCustomInfraName(e.target.value)}
+                  placeholder="E.g. Flyover crack, Bus shelter damage, Park bench broken…"
+                  className="w-full px-4 py-2.5 rounded-xl border border-outline-variant bg-surface-container-low text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary"
+                  maxLength={100}
+                  autoFocus
+                />
+                <p className="text-[10px] text-on-surface-variant mt-1.5">
+                  A new infrastructure category will be created automatically.
+                </p>
+              </div>
+            )}
+
+            {isAiInfer && (
+              <p className="mt-3 text-[11px] text-violet-600 bg-violet-50 px-3 py-2 rounded-lg">
+                🤖 AI will infer the issue type from your description and photo.
+              </p>
+            )}
+
+            <div className="flex gap-3 mt-5">
+              <button type="button" onClick={() => setStep(2)}
+                className="px-5 py-3 bg-surface-container border border-outline-variant text-on-surface rounded-xl text-sm font-bold">
+                ← Back
+              </button>
+              <button
+                type="button"
+                disabled={!canProceedStep3}
+                onClick={() => setStep(4)}
+                className="flex-1 py-3 bg-primary text-on-primary rounded-xl text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {canProceedStep3
+                  ? "Next — Describe Issue →"
+                  : isOtherType
+                  ? "Describe the type to continue"
+                  : "Select a type to continue"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── STEP 4: Description + Submit ── */}
+        {step === 4 && (
+          <div className="space-y-4 animate-in fade-in">
+
+            {/* Summary card */}
+            <div className="bg-surface-container rounded-xl p-4 border border-outline-variant/20 flex items-center gap-4">
+              {imagePreview && (
+                <img src={imagePreview} alt="" className="w-14 h-14 rounded-lg object-cover flex-shrink-0" />
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-semibold text-on-surface-variant">Your complaint so far</p>
+                <p className="text-sm font-medium text-on-surface truncate mt-0.5">
+                  {isKnownType
+                    ? infraTypes.find(it => it.id === selectedInfraId)?.name
+                    : isOtherType
+                    ? customInfraName || "Custom type"
+                    : "🤖 AI will classify"}
+                </p>
+                <p className="text-[10px] text-on-surface-variant mt-0.5 truncate">
+                  {addressText || `${lat?.toFixed(5)}, ${lng?.toFixed(5)}`}
+                </p>
+              </div>
+              <button type="button" onClick={() => setStep(3)}
+                className="ml-auto text-primary text-xs font-bold flex-shrink-0">
+                Edit
+              </button>
+            </div>
+
+            <div className="bg-surface-container-lowest rounded-xl border border-outline-variant/10 p-5 shadow-sm">
+              <label className="block text-[13px] font-semibold text-on-surface-variant uppercase tracking-wider mb-3">
+                Describe the issue
+              </label>
+              <textarea
+                className="w-full h-[130px] bg-surface-container-low border border-outline-variant/20 rounded-xl px-4 py-3 text-sm resize-vertical focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
+                value={text}
+                onChange={e => setText(e.target.value)}
+                placeholder="E.g. Pothole on the road near the market, around 40cm wide and very deep. Vehicles swerving to avoid it…"
+                required
+                autoFocus
+              />
+              <p className="text-[10px] text-on-surface-variant mt-2">
+                <span className="material-symbols-outlined text-[12px] mr-1">translate</span>
+                Supports Hindi, English, and 20+ Indian languages
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <button type="button" onClick={() => setStep(3)}
+                className="px-5 py-3.5 bg-surface-container border border-outline-variant text-on-surface rounded-xl text-sm font-bold">
+                ← Back
+              </button>
+              <button
+                type="submit"
+                disabled={isSubmitting || !canSubmit}
+                className="flex-1 flex items-center justify-center gap-2 bg-primary text-on-primary py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <span className="material-symbols-outlined text-lg">send</span>
+                {isSubmitting ? "Submitting…" : "Submit Complaint"}
+              </button>
+            </div>
+          </div>
+        )}
+
       </form>
     </AppLayout>
   );

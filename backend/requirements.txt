@@ -19,6 +19,7 @@ google-api-core==2.30.0
 google-auth==2.49.0
 google-cloud-core==2.5.0
 google-cloud-firestore==2.25.0
+google-cloud-aiplatform==1.142.0
 google-cloud-storage==3.10.0
 google-crc32c==1.8.0
 google-genai==1.66.0
