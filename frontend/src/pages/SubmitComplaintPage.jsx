@@ -2,9 +2,9 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import L from "leaflet";
-import "leaflet/dist/leaflet.css";
-import { MapContainer, Marker, TileLayer, useMapEvents } from "react-leaflet";
+import Map, { Marker, NavigationControl } from "react-map-gl";
+
+const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
 import {
   submitComplaint,
   fetchInfraTypes,
@@ -17,13 +17,6 @@ import { Card, CardHeader, CardTitle, CardContent } from "../components/ui/card"
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
-
-const markerIcon = new L.Icon({
-  iconUrl:   "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
-  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-  iconSize:  [25, 41],
-  iconAnchor:[12, 41],
-});
 
 // ── Leaflet click-to-pin ──────────────────────────────────────────
 function LocationPicker({ lat, lng, setLat, setLng, onPin }) {
@@ -384,22 +377,37 @@ export default function SubmitComplaintPage() {
 
               {/* Map */}
               <div className="rounded-xl overflow-hidden border border-outline-variant/10 mb-4" style={{ height: 280 }}>
-                <MapContainer
-                  center={lat !== null ? [lat, lng] : [28.6139, 77.209]}
-                  zoom={14}
-                  scrollWheelZoom
-                  style={{ height: "100%", width: "100%" }}
+                <Map
+                  key={`${lat ?? 28.6139}-${lng ?? 77.209}`}
+                  initialViewState={{
+                    longitude: lng ?? 77.209,
+                    latitude:  lat ?? 28.6139,
+                    zoom: 14, pitch: 45, bearing: -10,
+                  }}
+                  mapboxAccessToken={MAPBOX_TOKEN}
+                  mapStyle="mapbox://styles/mapbox/streets-v12"
+                  style={{ width:"100%", height:"100%" }}
+                  onClick={e => {
+                    const { lng: clickLng, lat: clickLat } = e.lngLat;
+                    setLat(clickLat); setLng(clickLng);
+                    setLocationStatus("Location pinned on map.");
+                    doReverseGeocode(clickLat, clickLng);
+                  }}
+                  cursor="crosshair"
+                  attributionControl={false}
                 >
-                  <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-                  <LocationPicker
-                    lat={lat} lng={lng}
-                    setLat={setLat} setLng={setLng}
-                    onPin={(lat, lng) => {
-                      setLocationStatus("Location pinned on map.");
-                      doReverseGeocode(lat, lng);
-                    }}
-                  />
-                </MapContainer>
+                  <NavigationControl position="bottom-right" showCompass visualizePitch />
+                  {lat !== null && (
+                    <Marker longitude={lng} latitude={lat} anchor="center">
+                      <div style={{
+                        width:18, height:18, borderRadius:"50%",
+                        background:"#6750A4", border:"3px solid white",
+                        boxShadow:"0 2px 12px rgba(103,80,164,0.6)",
+                        cursor:"crosshair",
+                      }} />
+                    </Marker>
+                  )}
+                </Map>
               </div>
 
               {/* Address field */}

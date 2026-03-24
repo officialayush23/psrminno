@@ -10,6 +10,7 @@ import {
   fetchAdminKPI, fetchDailyBriefing, fetchComplaintQueue, fetchWorkerTasks,
   fetchWorkflowSuggestions, approveWorkflow, assignTask,
   fetchAvailableWorkers, fetchAvailableContractors, fetchInfraNodeSummary,
+  fetchInfraNodeAiSummary, fetchAdminTaskList,
   rolloutSurvey, fetchOfficials,
 } from "../../api/adminApi";
 import { fetchAllComplaints } from "../../api/complaintsApi";
@@ -969,13 +970,8 @@ function InfraNodesTab() {
               </div>
             )}
 
-            {/* AI cluster summary */}
-            {summary.cluster_summary && (
-              <div className="bg-slate-50 rounded-xl p-4 border">
-                <p className="text-xs font-bold text-slate-500 uppercase mb-1.5">AI Cluster Summary</p>
-                <p className="text-sm text-slate-700">{summary.cluster_summary}</p>
-              </div>
-            )}
+            {/* AI deep analysis — on demand */}
+            <AiInfraSummary nodeId={selected} />
 
             {/* Complaint history */}
             <div>
@@ -1113,6 +1109,310 @@ function TendersTab({ prefillTask, onClear }) {
   );
 }
 
+// ── AI Infra Summary (on-demand) ─────────────────────────────────
+
+function AiInfraSummary({ nodeId }) {
+  const [aiData,   setAiData]   = useState(null);
+  const [loading,  setLoading]  = useState(false);
+  const [loaded,   setLoaded]   = useState(false);
+  const [error,    setError]    = useState(null);
+  const prevNode = useState(null);
+
+  // Reset when node changes
+  if (prevNode[0] !== nodeId) {
+    prevNode[0] = nodeId;
+    if (loaded) { setLoaded(false); setAiData(null); setError(null); }
+  }
+
+  const load = async () => {
+    setLoading(true); setError(null);
+    try {
+      const d = await fetchInfraNodeAiSummary(nodeId);
+      setAiData(d); setLoaded(true);
+    } catch { setError("AI analysis failed. Try again."); }
+    finally { setLoading(false); }
+  };
+
+  const SEVERITY_COLOR = {
+    low:"#10b981", medium:"#f97316", high:"#ef4444", critical:"#dc2626",
+  };
+
+  if (!loaded && !loading) return (
+    <div className="bg-gradient-to-r from-violet-50 to-sky-50 border border-violet-100 rounded-2xl p-5">
+      <div className="flex items-center gap-3 mb-3">
+        <div className="w-9 h-9 rounded-xl bg-violet-100 flex items-center justify-center">
+          <span className="material-symbols-outlined text-violet-600 text-[20px]">psychology</span>
+        </div>
+        <div>
+          <p className="font-bold text-slate-800 text-sm">AI Deep Analysis</p>
+          <p className="text-xs text-slate-500">Themes, frequency, incidents, recommendations</p>
+        </div>
+      </div>
+      <button onClick={load}
+        className="w-full py-2.5 bg-violet-600 text-white rounded-xl text-sm font-bold hover:bg-violet-700 transition flex items-center justify-center gap-2">
+        <span className="material-symbols-outlined text-[16px]">auto_awesome</span>
+        Generate AI Analysis
+      </button>
+    </div>
+  );
+
+  if (loading) return (
+    <div className="bg-violet-50 border border-violet-100 rounded-2xl p-5 flex items-center gap-3">
+      <span className="material-symbols-outlined text-violet-600 animate-spin text-[24px]">progress_activity</span>
+      <p className="text-sm text-violet-700 font-medium">Gemini is analysing complaint patterns…</p>
+    </div>
+  );
+
+  if (error) return (
+    <div className="bg-red-50 border border-red-100 rounded-xl p-4 flex items-center gap-3">
+      <span className="material-symbols-outlined text-red-500 text-[20px]">error</span>
+      <p className="text-sm text-red-600">{error}</p>
+      <button onClick={load} className="ml-auto text-xs font-bold text-red-600 hover:underline">Retry</button>
+    </div>
+  );
+
+  if (!aiData) return null;
+
+  return (
+    <div className="bg-white border border-violet-100 rounded-2xl overflow-hidden">
+      {/* Header */}
+      <div className="bg-gradient-to-r from-violet-600 to-sky-600 px-5 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-2.5">
+          <span className="material-symbols-outlined text-white text-[20px]">psychology</span>
+          <p className="font-bold text-white">AI Infrastructure Analysis</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs px-2.5 py-1 rounded-full font-bold capitalize text-white"
+            style={{ background: (SEVERITY_COLOR[aiData.estimated_severity]||"#6366f1")+"40" }}>
+            {aiData.estimated_severity?.toUpperCase()} SEVERITY
+          </span>
+          <button onClick={() => { setLoaded(false); setAiData(null); }}
+            className="w-6 h-6 rounded-full bg-white/20 flex items-center justify-center hover:bg-white/30">
+            <span className="material-symbols-outlined text-white text-[14px]">refresh</span>
+          </button>
+        </div>
+      </div>
+
+      <div className="p-5 flex flex-col gap-5">
+        {/* KPI row */}
+        <div className="grid grid-cols-1 gap-3">
+
+          {/* Recommended action - most prominent */}
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="material-symbols-outlined text-amber-600 text-[18px]">bolt</span>
+              <p className="text-xs font-bold text-amber-700 uppercase tracking-wider">Recommended Action</p>
+            </div>
+            <p className="text-sm font-semibold text-amber-900">{aiData.recommended_action}</p>
+          </div>
+
+          {/* Major themes */}
+          <div>
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Major Complaint Themes</p>
+            <div className="flex flex-wrap gap-2">
+              {(aiData.major_themes || []).map((t, i) => (
+                <span key={i} className="text-xs px-3 py-1.5 rounded-full bg-sky-50 text-sky-700 border border-sky-100 font-medium">
+                  {t}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* Frequency analysis */}
+          <div className="bg-slate-50 rounded-xl p-4 border border-slate-100">
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">Frequency Analysis</p>
+            <p className="text-sm text-slate-700 leading-relaxed">{aiData.frequency_analysis}</p>
+          </div>
+
+          {/* Criticality assessment */}
+          <div className="rounded-xl p-4 border"
+            style={{ borderColor: (SEVERITY_COLOR[aiData.estimated_severity]||"#6366f1")+"30",
+                     background:  (SEVERITY_COLOR[aiData.estimated_severity]||"#6366f1")+"08" }}>
+            <p className="text-xs font-bold uppercase tracking-wider mb-1.5"
+              style={{ color: SEVERITY_COLOR[aiData.estimated_severity]||"#6366f1" }}>
+              Criticality Assessment
+            </p>
+            <p className="text-sm text-slate-700 leading-relaxed">{aiData.criticality_assessment}</p>
+          </div>
+
+          {/* Incident timeline */}
+          {aiData.incident_timeline?.length > 0 && (
+            <div>
+              <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2.5">Incident Timeline</p>
+              <div className="flex flex-col gap-2">
+                {aiData.incident_timeline.map((item, i) => {
+                  const c = { high:"#ef4444", medium:"#f97316", low:"#10b981" }[item.severity] || "#6366f1";
+                  return (
+                    <div key={i} className="flex items-start gap-3 p-3 bg-white rounded-xl border border-slate-100">
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full flex-shrink-0 mt-0.5 capitalize"
+                        style={{ background: c+"15", color: c }}>{item.period}</span>
+                      <p className="text-xs text-slate-700 flex-1">{item.description}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ── Reroute Tab — reassign complaints to correct department ───────
+
+function RerouteTab() {
+  const [complaints, setComplaints] = useState([]);
+  const [departments, setDepartments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(null);
+  const [newDepts, setNewDepts] = useState([]);
+  const [reason, setReason] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [done, setDone] = useState(new Set());
+
+  useEffect(() => {
+    Promise.all([
+      fetchComplaintQueue({ limit:100 }),
+      fetchDepartments(),
+    ]).then(([q, d]) => {
+      setComplaints(q.items || []);
+      setDepartments(d || []);
+    }).catch(() => toast.error("Failed to load data"))
+    .finally(() => setLoading(false));
+  }, []);
+
+  const submit = async () => {
+    if (!selected) return;
+    if (newDepts.length === 0) { toast.error("Select at least one department"); return; }
+    if (!reason.trim()) { toast.error("Reason is required"); return; }
+    setSubmitting(true);
+    try {
+      await client.post(`/admin/complaints/${selected.id}/reroute`, {
+        new_dept_ids: newDepts,
+        reason: reason,
+      });
+      toast.success("Complaint rerouted successfully!");
+      setDone(prev => new Set([...prev, selected.id]));
+      setSelected(null); setNewDepts([]); setReason("");
+    } catch (e) { toast.error(e.response?.data?.detail || "Reroute failed"); }
+    finally { setSubmitting(false); }
+  };
+
+  const toggleDept = (deptId) => {
+    setNewDepts(prev => prev.includes(deptId) ? prev.filter(d => d !== deptId) : [...prev, deptId]);
+  };
+
+  const visibleComplaints = complaints.filter(c => !done.has(c.id));
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+      {/* Left: Complaints */}
+      <div className="lg:col-span-2 flex flex-col gap-3">
+        <div className="flex items-center gap-2 mb-1">
+          <h3 className="font-bold text-slate-700">Complaints</h3>
+          <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">{visibleComplaints.length}</span>
+        </div>
+        {loading ? Array(4).fill(0).map((_,i) => <div key={i} className="h-16 rounded-xl bg-slate-100 animate-pulse" />) :
+          visibleComplaints.length === 0 ? (
+            <div className="text-center py-12 text-slate-400">
+              <span className="material-symbols-outlined text-4xl block mb-1">alt_route</span>
+              <p className="text-sm">No complaints to reroute</p>
+            </div>
+          ) : (
+          <div className="flex flex-col gap-2 max-h-[600px] overflow-y-auto">
+            {visibleComplaints.map(c => (
+              <button key={c.id} onClick={() => { setSelected(c); setNewDepts([]); setReason(""); }}
+                className={`text-left p-3 rounded-xl border transition-all ${
+                  selected?.id === c.id ? "border-sky-500 bg-sky-50 shadow-sm" : "border-slate-200 bg-white hover:border-slate-300"
+                }`}>
+                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                  <Pill label={c.priority} color={PC[c.priority]} size="xs" />
+                  <Pill label={c.status} color={SC[c.status]||"#6366f1"} size="xs" />
+                </div>
+                <p className="font-semibold text-slate-800 text-xs truncate">{c.title}</p>
+                <p className="text-[10px] text-slate-500 mt-0.5 truncate">{c.address_text}</p>
+                {c.agent_suggested_dept_ids?.length > 0 && (
+                  <p className="text-[10px] text-sky-500 mt-0.5">{c.agent_suggested_dept_ids.length} depts currently assigned</p>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Right: Reroute panel */}
+      <div className="lg:col-span-3">
+        {!selected ? (
+          <div className="flex flex-col items-center justify-center h-64 text-slate-400">
+            <span className="material-symbols-outlined text-5xl mb-2">alt_route</span>
+            <p className="text-sm">Select a complaint to reroute it</p>
+            <p className="text-xs mt-1">Change which department(s) handle the complaint</p>
+          </div>
+        ) : (
+          <div className="bg-white border rounded-2xl p-5 flex flex-col gap-5">
+            {/* Selected complaint */}
+            <div className="bg-sky-50 border border-sky-100 rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-1">
+                <Pill label={selected.priority} color={PC[selected.priority]} size="xs" />
+                <span className="text-xs font-mono text-slate-400">#{selected.complaint_number}</span>
+              </div>
+              <p className="font-bold text-sky-800 text-sm">{selected.title}</p>
+              <p className="text-xs text-sky-600 mt-1">{selected.agent_summary}</p>
+            </div>
+
+            {/* Department selection */}
+            <div>
+              <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">
+                Assign to Department(s) *
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {departments.map(d => (
+                  <button key={d.id} type="button" onClick={() => toggleDept(d.id)}
+                    className={`p-3 rounded-xl border text-left transition-all ${
+                      newDepts.includes(d.id)
+                        ? "border-sky-500 bg-sky-50 shadow-sm"
+                        : "border-slate-200 hover:border-slate-300 bg-white"
+                    }`}>
+                    <p className="font-bold text-slate-800 text-xs">{d.name}</p>
+                    <p className="text-[10px] text-slate-400 mt-0.5">{d.code} · {d.jurisdiction_name || "City"}</p>
+                    {newDepts.includes(d.id) && (
+                      <span className="text-[10px] text-sky-600 font-bold mt-1 block">✓ Selected</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Reason */}
+            <div>
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-2">
+                Reason for Rerouting *
+              </label>
+              <textarea value={reason} onChange={e => setReason(e.target.value)}
+                rows={3} placeholder="Explain why this complaint is being rerouted to different departments…"
+                className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm resize-none focus:outline-none focus:ring-2 focus:ring-sky-200" />
+            </div>
+
+            <div className="flex gap-3">
+              <button onClick={() => setSelected(null)} className="px-4 py-2.5 border border-slate-200 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-50">
+                Cancel
+              </button>
+              <button onClick={submit} disabled={submitting || newDepts.length === 0 || !reason.trim()}
+                className="flex-1 bg-sky-600 text-white py-2.5 rounded-xl text-sm font-bold disabled:opacity-40 hover:bg-sky-700 transition flex items-center justify-center gap-2">
+                <span className="material-symbols-outlined text-[16px]">alt_route</span>
+                {submitting ? "Rerouting…" : "Confirm Reroute"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 // ── Main component ────────────────────────────────────────────────
 
 const TABS = [
@@ -1123,6 +1423,7 @@ const TABS = [
   { key:"tasks",       label:"Tasks",       icon:"construction" },
   { key:"surveys",     label:"Surveys",     icon:"rate_review" },
   { key:"infra",       label:"Infra Nodes", icon:"hub" },
+  { key:"reroute",     label:"Reroute",     icon:"alt_route" },
   { key:"tenders",     label:"Tenders",     icon:"receipt_long" },
 ];
 
@@ -1182,6 +1483,7 @@ export default function OfficialDashboardPage() {
         {tab === "tasks"      && <TasksTab onTenderRequest={handleTenderRequest} />}
         {tab === "surveys"    && <SurveysTab />}
         {tab === "infra"      && <InfraNodesTab />}
+        {tab === "reroute"    && <RerouteTab />}
         {tab === "tenders"    && <TendersTab prefillTask={tenderTask} onClear={() => setTenderTask(null)} />}
       </div>
 

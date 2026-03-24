@@ -189,3 +189,25 @@ export async function deactivateStaffUser(userId) {
   const { data } = await client.post(`/admin/users/${userId}/deactivate`);
   return data;
 }
+
+// ── Infra node AI summary (on-demand) ────────────────────────────
+
+/**
+ * Deep AI analysis of an infra node — call only when user clicks.
+ * Returns: { major_themes, frequency_analysis, criticality_assessment,
+ *            incident_timeline, recommended_action, estimated_severity }
+ */
+export async function fetchInfraNodeAiSummary(nodeId) {
+  const { data } = await client.get(`/admin/infra-nodes/${nodeId}/ai-summary`);
+  return data;
+}
+
+// ── Admin task list (dept-scoped) ─────────────────────────────────
+
+export async function fetchAdminTaskList({ status, deptId, limit = 50, offset = 0 } = {}) {
+  const params = { limit, offset };
+  if (status)  params.status  = status;
+  if (deptId)  params.dept_id = deptId;
+  const { data } = await client.get("/admin/tasks", { params });
+  return data;
+}
