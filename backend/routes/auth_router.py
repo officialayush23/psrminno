@@ -15,10 +15,8 @@ from dependencies import get_current_user
 from models import City, User
 from schemas import TokenData
 
-if not firebase_admin._apps:
-    cred = credentials.Certificate(settings.FIREBASE_SERVICE_ACCOUNT_PATH)
-    firebase_admin.initialize_app(cred)
-
+# Firebase is initialized lazily in dependencies.py on first request.
+# Do NOT re-initialize here — just use the already-initialized app.
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
 
@@ -32,11 +30,12 @@ class FirebaseTokenRequest(BaseModel):
 
 
 class UpdateMeRequest(BaseModel):
-    full_name:          Optional[str] = None
-    phone:              Optional[str] = None
-    preferred_language: Optional[str] = None
+    full_name:          Optional[str]  = None
+    phone:              Optional[str]  = None
+    preferred_language: Optional[str]  = None
     email_opt_in:       Optional[bool] = None
     twilio_opt_in:      Optional[bool] = None
+    fcm_token:          Optional[str]  = None   # Firebase Cloud Messaging device token
 
 
 class AuthResponse(BaseModel):
@@ -215,6 +214,9 @@ def update_me(
         user.email_opt_in = payload.email_opt_in
     if payload.twilio_opt_in is not None:
         user.twilio_opt_in = payload.twilio_opt_in
+    if payload.fcm_token is not None:
+        # Empty string clears the token (device logout)
+        user.fcm_token = payload.fcm_token or None
 
     db.commit()
     db.refresh(user)

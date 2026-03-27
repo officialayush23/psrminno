@@ -169,10 +169,21 @@ def send_email(
         msg.attach(MIMEText(text_body, "plain", "utf-8"))
         msg.attach(MIMEText(html_body, "html",  "utf-8"))
 
-        ctx = ssl.create_default_context()
-        with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, context=ctx) as server:
-            server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-            server.sendmail(settings.SMTP_USER, to_email, msg.as_string())
+        port = settings.SMTP_PORT
+        if port == 587:
+            # Gmail / port 587 → STARTTLS
+            with smtplib.SMTP(settings.SMTP_HOST, port) as server:
+                server.ehlo()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
+                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                server.sendmail(settings.SMTP_USER, to_email, msg.as_string())
+        else:
+            # Port 465 → SSL
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP_SSL(settings.SMTP_HOST, port, context=ctx) as server:
+                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                server.sendmail(settings.SMTP_USER, to_email, msg.as_string())
 
         logger.info("Email sent to %s subject=%s", to_email, subject)
         return True

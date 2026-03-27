@@ -1,5 +1,5 @@
 // src/pages/admin/OfficialDashboardPage.jsx — full glassmorphism revamp
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import Map, { Layer, Source, NavigationControl, Popup } from "react-map-gl";
 import AppLayout from "../../components/AppLayout";
@@ -555,23 +555,41 @@ function WorkflowTab({ onAssign }) {
         <div className="flex flex-col gap-2 max-h-150 overflow-y-auto">
           {complaints.length === 0 ? (
             <div className="text-center py-8 text-slate-500 text-sm">All complaints have workflows assigned</div>
-          ) : complaints.map(c => (
-            <button key={c.id} onClick={() => loadSuggestions(c)}
-              className="text-left p-4 rounded-xl transition-all"
-              style={{
-                background: selected?.id===c.id ? "rgba(56,189,248,0.1)" : "rgba(255,255,255,0.7)",
-                border: selected?.id===c.id ? "1px solid rgba(56,189,248,0.3)" : "1px solid rgba(0,0,0,0.07)",
-              }}>
-              <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-                <Pill label={c.priority} color={PC[c.priority]} size="xs" />
-                {c.is_repeat_complaint && <span className="text-[10px] text-orange-500 font-bold">↩ Repeat</span>}
-                {c.infra_node_id && <span className="text-[10px] text-violet-400 font-bold">Node-level</span>}
-              </div>
-              <p className="font-semibold text-slate-800 text-sm">{c.title}</p>
-              <p className="text-xs text-slate-500 mt-0.5 truncate">{c.address_text}</p>
-              {c.infra_type_code && <p className="text-[10px] text-sky-500 mt-1 font-mono">{c.infra_type_code}</p>}
-            </button>
-          ))}
+          ) : complaints.map(c => {
+            const emoji = INFRA_EMOJI[c.infra_type_code] || "📍";
+            const isSelected = selected?.id === c.id;
+            return (
+              <button key={c.id} onClick={() => loadSuggestions(c)}
+                className="text-left p-3 rounded-xl transition-all hover:-translate-y-0.5"
+                style={{
+                  background: isSelected ? "rgba(56,189,248,0.1)" : "rgba(255,255,255,0.8)",
+                  border: isSelected ? "1px solid rgba(56,189,248,0.35)" : "1px solid rgba(0,0,0,0.08)",
+                  boxShadow: isSelected ? "0 2px 12px rgba(56,189,248,0.15)" : "0 1px 4px rgba(0,0,0,0.04)",
+                }}>
+                <div className="flex items-start gap-3">
+                  {/* Infra icon */}
+                  <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-lg"
+                    style={{ background: isSelected ? "rgba(56,189,248,0.15)" : "rgba(0,0,0,0.05)" }}>
+                    {emoji}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                      <span className="text-[10px] font-bold text-sky-500 font-mono">{c.infra_type_code||"MISC"}</span>
+                      <Pill label={c.priority} color={PC[c.priority]} size="xs" />
+                      {c.is_repeat_complaint && <span className="text-[9px] text-orange-500 font-bold">↩</span>}
+                    </div>
+                    <p className="font-semibold text-slate-800 text-xs leading-snug">{c.title}</p>
+                    <p className="text-[10px] text-slate-400 mt-0.5 truncate">{c.address_text}</p>
+                    {c.node_complaint_count > 1 && (
+                      <p className="text-[10px] text-violet-400 font-semibold mt-0.5">
+                        {c.node_complaint_count} complaints at this node
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
         </div>
       </div>
 

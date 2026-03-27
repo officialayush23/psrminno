@@ -30,13 +30,19 @@ app = FastAPI(
 
 # ── CORS ──────────────────────────────────────────────────────────
 
+_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    # Cloud Run backend itself (for internal calls)
+    "https://pscrm-backend-533570030345.asia-south1.run.app",
+    # Add your Firebase Hosting / Vercel / custom frontend URL here:
+    os.getenv("FRONTEND_URL", "http://localhost:5173"),
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:3000",
-        os.getenv("FRONTEND_URL", "http://localhost:5173"),
-    ],
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_origin_regex=r"https://.*\.web\.app",   # Firebase Hosting wildcard
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -54,10 +60,11 @@ app.include_router(pubsub_router.router)
 app.include_router(infra_router.router)
 
 
-# ── Startup schema check ──────────────────────────────────────────
+# ── Startup ───────────────────────────────────────────────────────
 
 @app.on_event("startup")
 def startup_schema_check():
+    """Quick sanity check that the DB is reachable and schema exists."""
     sentinel_queries = [
         "SELECT 1 FROM complaints LIMIT 0",
         "SELECT 1 FROM infra_nodes LIMIT 0",
@@ -77,6 +84,16 @@ def startup_schema_check():
         logger.warning("Schema check warning (non-fatal): %s", exc)
     finally:
         db.close()
+
+    # Log key config so we can verify secrets loaded correctly in Cloud Run logs
+    from config import settings
+    logger.info(
+        "Config: PUBSUB_ENABLED=%s GCS_ENABLED=%s SMTP_HOST=%s FIREBASE_SA=%s",
+        settings.PUBSUB_ENABLED,
+        settings.GCS_ENABLED,
+        settings.SMTP_HOST or "not set",
+        settings.FIREBASE_SERVICE_ACCOUNT_PATH,
+    )
 
 
 # ── Health ────────────────────────────────────────────────────────

@@ -107,12 +107,101 @@ def _get_steps_for_version(db: Session, version_id: str) -> List[Dict]:
     return [dict(r) for r in rows]
 
 
+# ── Infra type → keyword mapping for text matching ────────────────
+
+_INFRA_KEYWORDS = {
+    "POTHOLE":    ["pothole", "crater", "road damage", "road repair", "road"],
+    "ROAD":       ["road", "pavement", "tarmac", "surface", "carriageway"],
+    "STLIGHT":    ["streetlight", "street light", "lamp post", "light", "illumination"],
+    "DRAIN":      ["drain", "drainage", "waterlogging", "flood", "gutter", "sewer"],
+    "FOOTPATH":   ["footpath", "pavement", "sidewalk", "walking"],
+    "TREE":       ["tree", "branch", "fallen", "pruning", "green"],
+    "GARBAGE":    ["garbage", "waste", "trash", "dustbin", "sanitation", "cleaning"],
+    "WIRE_HAZARD":["wire", "cable", "electrical", "hazard", "shock"],
+    "WATER_PIPE": ["water", "pipe", "supply", "leakage", "tap"],
+    "SEWER":      ["sewer", "sewage", "drainage", "blockage"],
+    "ELEC_POLE":  ["pole", "electric", "power", "electricity"],
+}
+
+
+def _get_infra_keywords(infra_type_code: str) -> List[str]:
+    return _INFRA_KEYWORDS.get(infra_type_code.upper(), [infra_type_code.lower()])
+
+
+def _semantic_workflow_suggestions(
+    db: Session,
+    *,
+    complaint_id: Optional[str],
+    city_id: str,
+    infra_type_code: str,
+    complaint_summary: str,
+) -> List[Dict]:
+    """
+    Phase 1: semantic search via pgvector.
+    Finds workflows used for past complaints similar to this one.
+    Returns template_ids ranked by similarity + usage.
+    Returns empty list if complaint has no embedding or no similar history.
+    """
+    if not complaint_id:
+        return []
+
+    try:
+        # Get the complaint embedding
+        emb_row = db.execute(
+            text("""
+                SELECT text_embedding
+                FROM complaint_embeddings
+                WHERE complaint_id = CAST(:cid AS uuid)
+            """),
+            {"cid": complaint_id},
+        ).first()
+
+        if not emb_row or emb_row[0] is None:
+            return []
+
+        embedding = emb_row[0]
+
+        # Find workflows used for similar past complaints (pgvector cosine distance)
+        rows = db.execute(
+            text("""
+                SELECT
+                    wi.template_id,
+                    MIN(ce.text_embedding <=> :emb::vector(768)) AS min_distance,
+                    COUNT(DISTINCT wc.complaint_id) AS usage_count
+                FROM complaint_embeddings ce
+                JOIN workflow_complaints wc ON wc.complaint_id = ce.complaint_id
+                JOIN workflow_instances  wi ON wi.id = wc.workflow_instance_id
+                JOIN workflow_templates  wt ON wt.id = wi.template_id
+                WHERE ce.complaint_id != CAST(:cid AS uuid)
+                  AND wt.city_id = CAST(:city AS uuid)
+                  AND (ce.text_embedding <=> :emb::vector(768)) < 0.6
+                GROUP BY wi.template_id
+                ORDER BY min_distance ASC, usage_count DESC
+                LIMIT 5
+            """),
+            {"emb": str(embedding), "cid": complaint_id, "city": city_id},
+        ).mappings().all()
+
+        return [
+            {
+                "template_id": str(r["template_id"]),
+                "semantic_distance": float(r["min_distance"]),
+                "usage_count": int(r["usage_count"]),
+                "source": "semantic",
+            }
+            for r in rows
+        ]
+    except Exception as exc:
+        logger.warning("Semantic workflow search failed (non-fatal): %s", exc)
+        return []
+
+
 # ── suggest_workflows ─────────────────────────────────────────────
 
 def suggest_workflows(
     db: Session,
     *,
-    complaint_id: str,
+    complaint_id: Optional[str],
     city_id: str,
     infra_type_code: str,
     complaint_summary: str,
@@ -122,32 +211,47 @@ def suggest_workflows(
     """
     Returns top-3 workflow template suggestions.
 
-    Matching strategy (two-pass):
-      Pass 1 — templates whose situation_infra_codes contain this infra_type_code
-               OR whose infra_type_id matches (via version).
-               These are always preferred.
-      Pass 2 — fill remaining slots from other templates, scored by keywords + usage.
+    Three-phase matching (best signal wins):
+      Phase 1 — Semantic: pgvector similarity on complaint embeddings → past workflow usage
+      Phase 2 — Structural: templates whose name/description/keywords match the infra type
+      Phase 3 — Fallback: any template for this city, scored by text similarity
 
-    This guarantees a pothole node never gets a streetlight workflow ranked first.
+    Scoring: semantic match (+12), infra keyword in name (+8), code in situation_infra_codes (+6),
+             keyword match in summary (+3 each, max 4), usage weight (max +2).
     """
-    _BASE_QUERY = """
+    infra_keywords = _get_infra_keywords(infra_type_code)
+
+    # Phase 1 — semantic
+    semantic_matches = _semantic_workflow_suggestions(
+        db,
+        complaint_id=complaint_id,
+        city_id=city_id,
+        infra_type_code=infra_type_code,
+        complaint_summary=complaint_summary,
+    )
+    semantic_ids = {s["template_id"]: s for s in semantic_matches}
+
+    # Phase 2 — structural: keyword in name/description
+    keyword_conditions = " OR ".join(
+        f"(wt.name ILIKE :kw{i} OR COALESCE(wt.description,'') ILIKE :kw{i} OR COALESCE(wt.situation_summary,'') ILIKE :kw{i})"
+        for i in range(len(infra_keywords))
+    )
+
+    _BASE = """
         SELECT
             wt.id, wt.name, wt.description,
             wt.situation_summary, wt.situation_keywords,
             wt.situation_infra_codes, wt.times_used, wt.avg_completion_days,
-            wtv.id AS version_id,
-            COUNT(wts.id) AS step_count
+            wtv.id AS version_id
         FROM workflow_templates wt
         JOIN workflow_template_versions wtv
-            ON  wtv.template_id      = wt.id
-            AND wtv.is_active         = TRUE
-            AND wtv.is_latest_version = TRUE
-        LEFT JOIN workflow_template_steps wts ON wts.version_id = wtv.id
+            ON  wtv.template_id       = wt.id
+            AND wtv.is_active          = TRUE
+            AND wtv.is_latest_version  = TRUE
         {where}
-        GROUP BY wt.id, wt.name, wt.description,
-                 wt.situation_summary, wt.situation_keywords,
-                 wt.situation_infra_codes, wt.times_used, wt.avg_completion_days,
-                 wtv.id
+        GROUP BY wt.id, wt.name, wt.description, wt.situation_summary,
+                 wt.situation_keywords, wt.situation_infra_codes,
+                 wt.times_used, wt.avg_completion_days, wtv.id
         ORDER BY wt.times_used DESC, wt.avg_completion_days ASC NULLS LAST
         LIMIT {limit}
     """
@@ -155,33 +259,36 @@ def suggest_workflows(
     seen_ids: set = set()
     candidates: list = []
 
-    # ── Pass 1: infra-type-matched templates (always shown first) ─
-    if infra_type_code:
-        matched = db.execute(
-            text(_BASE_QUERY.format(
-                where="""
-                    WHERE wt.city_id = CAST(:city_id AS uuid)
-                      AND (
-                        :infra_code = ANY(wt.situation_infra_codes)
-                        OR EXISTS (
-                            SELECT 1 FROM infra_types it2
-                            WHERE it2.code = :infra_code
-                              AND wtv.infra_type_id = it2.id
-                        )
-                      )
-                """,
-                limit=6,
-            )),
-            {"city_id": city_id, "infra_code": infra_type_code},
-        ).mappings().all()
-        for r in matched:
-            seen_ids.add(str(r["id"]))
-            candidates.append(dict(r) | {"_pass": 1})
+    # Phase 2a — exact infra code match OR keyword in name
+    kw_params: Dict[str, Any] = {"city_id": city_id, "infra_code": infra_type_code}
+    for i, kw in enumerate(infra_keywords):
+        kw_params[f"kw{i}"] = f"%{kw}%"
 
-    # ── Pass 2: fill with any remaining templates ─────────────────
+    where_phrase = f"""
+        WHERE wt.city_id = CAST(:city_id AS uuid)
+          AND (
+            :infra_code = ANY(COALESCE(wt.situation_infra_codes, ARRAY[]::text[]))
+            OR EXISTS (
+                SELECT 1 FROM infra_types it2
+                WHERE it2.code = :infra_code AND wtv.infra_type_id = it2.id
+            )
+            {("OR " + keyword_conditions) if keyword_conditions else ""}
+          )
+    """
+
+    matched = db.execute(
+        text(_BASE.format(where=where_phrase, limit=6)),
+        kw_params,
+    ).mappings().all()
+
+    for r in matched:
+        seen_ids.add(str(r["id"]))
+        candidates.append(dict(r) | {"_match_type": "structural"})
+
+    # Phase 3 — fill remaining from any template
     if len(candidates) < 6:
         others = db.execute(
-            text(_BASE_QUERY.format(
+            text(_BASE.format(
                 where="WHERE wt.city_id = CAST(:city_id AS uuid)",
                 limit=12,
             )),
@@ -189,7 +296,7 @@ def suggest_workflows(
         ).mappings().all()
         for r in others:
             if str(r["id"]) not in seen_ids:
-                candidates.append(dict(r) | {"_pass": 2})
+                candidates.append(dict(r) | {"_match_type": "fallback"})
             if len(candidates) >= 9:
                 break
 
@@ -199,57 +306,58 @@ def suggest_workflows(
     template_map = {str(c["id"]): c for c in candidates}
     version_map  = {str(c["id"]): str(c["version_id"]) for c in candidates}
 
-    def score_template(t):
-        score = 0
+    def score_template(t: dict) -> dict:
+        tid   = str(t["id"])
+        score = 0.0
 
-        # Pass-1 templates get a huge head-start — they match the infra type
-        if t.get("_pass") == 1:
-            score += 10
+        # Semantic match (strongest signal)
+        if tid in semantic_ids:
+            sem = semantic_ids[tid]
+            # distance 0=identical, 0.6=threshold; invert and scale
+            score += 12.0 * (1.0 - sem["semantic_distance"] / 0.6)
 
-        # Infra code match in situation_infra_codes
-        infra_codes = t.get("situation_infra_codes") or []
-        if infra_type_code and infra_type_code in infra_codes:
-            score += 5
+        # Structural match
+        if t.get("_match_type") == "structural":
+            score += 5.0
+
+        # Infra code in situation_infra_codes
+        if infra_type_code in (t.get("situation_infra_codes") or []):
+            score += 6.0
+
+        # Infra keyword in template name
+        name_lower = (t.get("name") or "").lower()
+        for kw in infra_keywords:
+            if kw.lower() in name_lower:
+                score += 8.0
+                break
 
         # Keyword match against complaint summary
-        keywords = t.get("situation_keywords") or []
-        kw_matches = sum(
-            1 for kw in keywords
-            if kw.lower() in (complaint_summary or "").lower()
-        )
-        score += min(kw_matches, 4)
+        kws = t.get("situation_keywords") or []
+        kw_hits = sum(1 for kw in kws if kw.lower() in (complaint_summary or "").lower())
+        score += min(kw_hits * 3.0, 4.0 * 3.0)
 
-        # Name match — direct infra type word in template name
-        if infra_type_code:
-            name_lower = (t.get("name") or "").lower()
-            code_lower = infra_type_code.lower().replace("_", " ")
-            if code_lower in name_lower or infra_type_code.lower() in name_lower:
-                score += 3
+        # Repeat + priority bonuses
+        if is_repeat:        score += 1.0
+        if priority in ("critical", "emergency", "high"): score += 0.5
 
-        # Repeat complaint bonus
-        if is_repeat:
-            score += 1
+        # Usage weight (capped — don't let popularity override type match)
+        score += min((t.get("times_used") or 0) / 20.0, 2.0)
 
-        # Usage weight (capped — don't let usage override type match)
+        # Build human-readable reason
+        reasons = []
+        if tid in semantic_ids:
+            reasons.append(f"semantically similar to {semantic_ids[tid]['usage_count']} past complaint(s)")
+        if infra_type_code in (t.get("situation_infra_codes") or []) or t.get("_match_type") == "structural":
+            reasons.append(f"matches {infra_type_code} infra type")
+        if kw_hits:
+            reasons.append(f"{kw_hits} keyword match{'es' if kw_hits > 1 else ''}")
         times_used = t.get("times_used") or 0
-        score += min(times_used / 20.0, 2)
-
-        # High priority bonus
-        if priority in ("critical", "emergency", "high"):
-            score += 0.5
-
-        match_pct  = min(99, max(10, int(score / 25.0 * 100)))
-        is_type_match = t.get("_pass") == 1 or infra_type_code in (t.get("situation_infra_codes") or [])
-        reason = (
-            f"Direct infra type match ({infra_type_code}). " if is_type_match else ""
-        ) + (
-            f"{kw_matches} keyword match{'es' if kw_matches != 1 else ''}. " if kw_matches else ""
-        ) + f"Used {times_used} time{'s' if times_used != 1 else ''}."
+        reasons.append(f"used {times_used} time{'s' if times_used != 1 else ''}")
 
         return {
-            "template_id":           str(t["id"]),
-            "match_score":           match_pct / 100,
-            "match_reason":          reason,
+            "template_id":           tid,
+            "match_score":           min(0.99, score / 30.0),
+            "match_reason":          " · ".join(reasons),
             "recommended_priority":  1,
             "_raw_score":            score,
         }
@@ -258,9 +366,9 @@ def suggest_workflows(
     suggestions = scored[:3]
 
     result = []
-    for s in suggestions[:3]:
-        tid  = s.get("template_id")
-        tmpl = template_map.get(tid)
+    for s in suggestions:
+        tid   = s["template_id"]
+        tmpl  = template_map.get(tid)
         if not tmpl:
             continue
         vid   = version_map.get(tid)
@@ -272,22 +380,22 @@ def suggest_workflows(
             "situation_summary":    tmpl["situation_summary"],
             "times_used":           tmpl["times_used"],
             "avg_completion_days":  float(tmpl["avg_completion_days"] or 0),
-            "match_score":          s.get("match_score", 0.7),
-            "match_reason":         s.get("match_reason", ""),
-            "recommended_priority": s.get("recommended_priority", 1),
+            "match_score":          s["match_score"],
+            "match_reason":         s["match_reason"],
+            "recommended_priority": s["recommended_priority"],
             "version_id":           vid,
             "steps": [
                 {
-                    "step_number":            step["step_number"],
-                    "step_name":              step["step_name"],
-                    "description":            step.get("description"),
-                    "dept_name":              step["dept_name"],
-                    "dept_code":              step["dept_code"],
-                    "department_id":          str(step["department_id"]),
-                    "expected_duration_hours":step["expected_duration_hours"],
-                    "work_type_codes":        step["work_type_codes"] or [],
-                    "is_optional":            step["is_optional"],
-                    "requires_tender":        step["requires_tender"],
+                    "step_number":             step["step_number"],
+                    "step_name":               step["step_name"],
+                    "description":             step.get("description"),
+                    "dept_name":               step["dept_name"],
+                    "dept_code":               step["dept_code"],
+                    "department_id":           str(step["department_id"]),
+                    "expected_duration_hours": step["expected_duration_hours"],
+                    "work_type_codes":         step["work_type_codes"] or [],
+                    "is_optional":             step["is_optional"],
+                    "requires_tender":         step["requires_tender"],
                 }
                 for step in steps
             ],
@@ -640,10 +748,22 @@ def suggest_workflows_for_node(
     severity = node["cluster_severity"] or "medium"
     priority = "high" if severity in ("high", "critical") else "normal"
 
+    # Get most recent open complaint for semantic search
+    recent_complaint = db.execute(
+        text("""
+            SELECT id FROM complaints
+            WHERE infra_node_id = CAST(:nid AS uuid)
+              AND is_deleted = FALSE
+              AND status NOT IN ('resolved','closed','rejected')
+            ORDER BY created_at DESC LIMIT 1
+        """),
+        {"nid": infra_node_id},
+    ).scalar()
+
     # Use existing suggest_workflows with node-derived context
     suggestions = suggest_workflows(
         db,
-        complaint_id=None,          # not needed — we have node summary
+        complaint_id=str(recent_complaint) if recent_complaint else None,
         city_id=city_id,
         infra_type_code=node["infra_type_code"] or "GENERAL",
         complaint_summary=node_summary,

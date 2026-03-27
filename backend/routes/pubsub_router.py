@@ -20,20 +20,24 @@ router = APIRouter(prefix="/pubsub", tags=["PubSub"])
 
 def _verify_pubsub_request(request: Request) -> None:
     """
-    Allow either:
-    - GCP push-style request marker header (X-Goog-Resource-State), or
-    - Bearer token matching PUBSUB_PUSH_SECRET when configured.
+    Verify Pub/Sub push request. Accepts:
+    1. ?token=<secret> query param  (our subscription URLs use this)
+    2. Authorization: Bearer <secret> header (fallback)
+    3. No secret configured → allow all (dev mode)
     """
     if not settings.PUBSUB_PUSH_SECRET:
         return
 
-    if request.headers.get("x-goog-resource-state"):
+    # Primary: query param token (set in subscription push endpoint URL)
+    token = request.query_params.get("token", "")
+    if token and token == settings.PUBSUB_PUSH_SECRET:
         return
 
+    # Fallback: Bearer header
     auth_header = request.headers.get("authorization", "")
     if auth_header.lower().startswith("bearer "):
-        token = auth_header.split(" ", 1)[1].strip()
-        if token == settings.PUBSUB_PUSH_SECRET:
+        bearer = auth_header.split(" ", 1)[1].strip()
+        if bearer == settings.PUBSUB_PUSH_SECRET:
             return
 
     raise HTTPException(status_code=401, detail="Unauthorized Pub/Sub push request")
