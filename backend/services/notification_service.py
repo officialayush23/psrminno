@@ -170,26 +170,27 @@ def send_email(
         msg.attach(MIMEText(html_body, "html",  "utf-8"))
 
         port = settings.SMTP_PORT
+        logger.info("SMTP attempt: host=%s port=%s user=%s to=%s",
+                    settings.SMTP_HOST, port, settings.SMTP_USER, to_email)
+
         if port == 587:
-            # Gmail / port 587 → STARTTLS
-            with smtplib.SMTP(settings.SMTP_HOST, port) as server:
+            with smtplib.SMTP(settings.SMTP_HOST, port, timeout=30) as server:
                 server.ehlo()
                 server.starttls(context=ssl.create_default_context())
                 server.ehlo()
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
                 server.sendmail(settings.SMTP_USER, to_email, msg.as_string())
         else:
-            # Port 465 → SSL
             ctx = ssl.create_default_context()
-            with smtplib.SMTP_SSL(settings.SMTP_HOST, port, context=ctx) as server:
+            with smtplib.SMTP_SSL(settings.SMTP_HOST, port, context=ctx, timeout=30) as server:
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
                 server.sendmail(settings.SMTP_USER, to_email, msg.as_string())
 
         logger.info("Email sent to %s subject=%s", to_email, subject)
         return True
     except Exception as exc:
-        logger.error("SMTP failed to=%s: %s", to_email, exc)
-        return False
+        logger.error("SMTP failed to=%s error=%s", to_email, exc)
+        raise  # re-raise so caller captures error_message
 
 
 def _make_html_email(title: str, body: str, cta_url: Optional[str] = None) -> str:
@@ -277,12 +278,19 @@ def dispatch_notification(
     # email_opt_in defaults to True — send unless explicitly opted out
     if user["email"] and (user["email_opt_in"] is None or user["email_opt_in"]):
         html = _make_html_email(title, body, cta_url)
-        results["email"] = send_email(
-            to_email=user["email"],
-            subject=title,
-            html_body=html,
-            text_body=body,
-        )
+        email_error = None
+        try:
+            send_email(
+                to_email=user["email"],
+                subject=title,
+                html_body=html,
+                text_body=body,
+            )
+            results["email"] = True
+        except Exception as exc:
+            results["email"] = False
+            email_error = str(exc)
+            logger.error("Email dispatch failed to=%s: %s", user["email"], exc)
         _write_notif_log(
             db,
             user_id=user_id,
@@ -292,6 +300,7 @@ def dispatch_notification(
             payload={"title": title, "body": body, "variables": variables},
             status="sent" if results["email"] else "failed",
             data=data,
+            error_message=email_error,
         )
 
     db.commit()
@@ -308,12 +317,8 @@ def _write_notif_log(
     payload: dict,
     status: str,
     data: dict,
+    error_message: str = None,
 ) -> None:
-    """
-    Inserts a row into notification_logs aligned with final.sql schema:
-      recipient_user_id, recipient_contact, channel, event_type,
-      complaint_id, payload, status
-    """
     complaint_id = data.get("complaint_id")
     try:
         db.execute(
@@ -322,7 +327,7 @@ def _write_notif_log(
                     recipient_user_id, recipient_contact,
                     channel, event_type,
                     complaint_id,
-                    payload, status
+                    payload, status, error_message
                 ) VALUES (
                     CAST(:uid     AS uuid),
                     :contact,
@@ -330,17 +335,19 @@ def _write_notif_log(
                     :event_type,
                     CAST(:cid     AS uuid),
                     CAST(:payload AS jsonb),
-                    :status
+                    :status,
+                    :error_message
                 )
             """),
             {
-                "uid":        user_id,
-                "contact":    contact,
-                "channel":    channel,
-                "event_type": event_type,
-                "cid":        complaint_id,
-                "payload":    json.dumps(payload),
-                "status":     status,
+                "uid":           user_id,
+                "contact":       contact,
+                "channel":       channel,
+                "event_type":    event_type,
+                "cid":           complaint_id,
+                "payload":       json.dumps(payload),
+                "status":        status,
+                "error_message": error_message,
             },
         )
     except Exception as exc:

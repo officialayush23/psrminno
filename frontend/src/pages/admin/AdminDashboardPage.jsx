@@ -118,10 +118,14 @@ export default function AdminDashboardPage() {
 
   async function loadStaff() {
     try {
-      const [staffRes, deptRes, jurisRes, tasksRes] = await Promise.all([
-        fetchStaffUsers(), fetchDepartments(), fetchJurisdictions(),
+      const [staffRes, deptRes, tasksRes] = await Promise.all([
+        fetchStaffUsers(), fetchDepartments(),
         fetchAdminTaskList({ deptId: adminDeptId || undefined, limit: 200 }),
       ]);
+      // Fetch jurisdictions separately so it doesn't crash the whole load
+      let jurisRes = [];
+      try { jurisRes = await fetchJurisdictions(); } catch {}
+
       const users = toItems(staffRes);
       const scoped = adminDeptId ? users.filter((u) => (u.department_id || u.dept_id) === adminDeptId) : users;
       setStaff(scoped);
@@ -134,7 +138,11 @@ export default function AdminDashboardPage() {
         counts.set(uid, (counts.get(uid) || 0) + 1);
       }
       setTaskCountMap(counts);
-    } catch { toast.error("Failed to load staff data"); setStaff([]); }
+    } catch (err) {
+      console.error("loadStaff failed:", err);
+      toast.error("Failed to load staff data");
+      setStaff([]);
+    }
   }
 
   async function loadAlerts() {

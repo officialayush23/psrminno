@@ -12,7 +12,7 @@ import {
   fetchInfraNodeAiSummary, fetchAdminTaskList, fetchInfraNodeMap,
   rolloutSurvey, fetchOfficials, fetchDepartments,
   fetchInfraNodeWorkflowSuggestions, approveInfraNodeWorkflow,
-  fetchInfraNodeTasks, assignWorkflowWorkers,
+  fetchInfraNodeTasks, assignWorkflowWorkers, fetchInfraNodes,
 } from "../../api/adminApi";
 import client from "../../api/client";
 import { toast } from "sonner";
@@ -1010,48 +1010,100 @@ function TasksTab({ onTenderRequest }) {
 // ── Surveys tab ───────────────────────────────────────────────────
 
 function SurveyRolloutForm() {
-  const [complaints, setComplaints] = useState([]);
-  const [complaintId, setComplaintId] = useState("");
+  const [nodes, setNodes] = useState([]);
+  const [nodeComplaints, setNodeComplaints] = useState([]);
+  const [nodeId, setNodeId] = useState("");
+  const [complaintId, setComplaintId] = useState("all");
   const [surveyType, setSurveyType] = useState("midway");
   const [sending, setSending] = useState(false);
+  const [loadingNodes, setLoadingNodes] = useState(true);
 
   useEffect(() => {
-    fetchComplaintQueue({ limit:50 }).then(d => {
-      // Show complaints that have a workflow or are active
-      const active = (d.items||[]).filter(c => !['resolved','closed','rejected'].includes(c.status));
-      setComplaints(active);
-    });
+    setLoadingNodes(true);
+    fetchInfraNodes({ limit: 50 })
+      .then(d => setNodes(d.items || []))
+      .catch(() => setNodes([]))
+      .finally(() => setLoadingNodes(false));
   }, []);
 
+  useEffect(() => {
+    if (!nodeId) { setNodeComplaints([]); setComplaintId("all"); return; }
+    fetchComplaintQueue({ limit: 30 }).then(d => {
+      const linked = (d.items || []).filter(c =>
+        c.infra_node_id === nodeId && !["resolved","closed","rejected"].includes(c.status)
+      );
+      setNodeComplaints(linked);
+      setComplaintId("all");
+    });
+  }, [nodeId]);
+
   const send = async () => {
-    if (!complaintId) { toast.error("Select a complaint"); return; }
+    if (!nodeId) { toast.error("Select an infra node"); return; }
     setSending(true);
     try {
-      await rolloutSurvey(complaintId, surveyType);
-      toast.success("Survey dispatched to citizen"); setComplaintId("");
-    } catch (e) { toast.error(e.response?.data?.detail||"Failed"); }
+      const targets = complaintId === "all" ? nodeComplaints.map(c => c.id) : [complaintId];
+      if (targets.length === 0) { toast.error("No open complaints for this node"); setSending(false); return; }
+      await Promise.all(targets.map(cid => rolloutSurvey(cid, surveyType)));
+      toast.success(`Survey sent to ${targets.length} citizen(s)`);
+      setNodeId(""); setComplaintId("all");
+    } catch (e) { toast.error(e.response?.data?.detail || "Failed to send survey"); }
     finally { setSending(false); }
   };
 
+  const selectedNode = nodes.find(n => n.id === nodeId);
+
   return (
     <div className="flex flex-col gap-4 max-w-md">
-      <select value={complaintId} onChange={e => setComplaintId(e.target.value)}
-        className="px-3 py-2.5 rounded-xl text-sm ginput">
-        <option value="">Select complaint…</option>
-        {complaints.map(c => <option key={c.id} value={c.id}>#{c.complaint_number} — {c.title}</option>)}
-      </select>
-      <div className="flex gap-2">
-        {["midway","completion","worker_feedback"].map(t => (
-          <button key={t} onClick={() => setSurveyType(t)}
-            className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all ${surveyType===t ? "" : "gbtn-ghost"}`}
-            style={surveyType===t ? { background:"rgba(56,189,248,0.15)", border:"1px solid rgba(56,189,248,0.3)", color:"#38bdf8" } : {}}>
-            {t.replace("_"," ")}
-          </button>
-        ))}
+      {/* Infra node selector */}
+      <div>
+        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Infra Node</label>
+        <select value={nodeId} onChange={e => setNodeId(e.target.value)}
+          className="px-3 py-2.5 rounded-xl text-sm ginput w-full">
+          <option value="">{loadingNodes ? "Loading nodes…" : "Select infra node…"}</option>
+          {nodes.map(n => (
+            <option key={n.id} value={n.id}>
+              {n.infra_type_name} — {n.jurisdiction_name || "Unknown area"} ({n.open_complaint_count} open)
+            </option>
+          ))}
+        </select>
       </div>
-      <button onClick={send} disabled={sending||!complaintId}
+
+      {/* Complaint selector (optional — default sends to all) */}
+      {nodeId && nodeComplaints.length > 0 && (
+        <div>
+          <label className="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Complaint (optional)</label>
+          <select value={complaintId} onChange={e => setComplaintId(e.target.value)}
+            className="px-3 py-2.5 rounded-xl text-sm ginput w-full">
+            <option value="all">All open complaints ({nodeComplaints.length})</option>
+            {nodeComplaints.map(c => (
+              <option key={c.id} value={c.id}>#{c.complaint_number} — {c.title?.slice(0,40)}</option>
+            ))}
+          </select>
+        </div>
+      )}
+      {nodeId && nodeComplaints.length === 0 && (
+        <p className="text-xs text-amber-400 px-1">No open complaints for this node</p>
+      )}
+
+      {/* Survey type */}
+      <div>
+        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Survey Type</label>
+        <div className="flex gap-2">
+          {[["midway","Midway"],["completion","Completion"],["worker_feedback","Worker"]].map(([t, l]) => (
+            <button key={t} onClick={() => setSurveyType(t)}
+              className="flex-1 py-2 rounded-xl text-xs font-bold transition-all"
+              style={surveyType===t
+                ? { background:"rgba(56,189,248,0.15)", border:"1px solid rgba(56,189,248,0.3)", color:"#38bdf8" }
+                : { background:"rgba(0,0,0,0.04)", border:"1px solid rgba(0,0,0,0.08)", color:"#64748b" }}>
+              {l}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <button onClick={send} disabled={sending || !nodeId || nodeComplaints.length === 0}
         className="gbtn-sky py-2.5 font-bold text-sm disabled:opacity-40">
-        {sending ? "Sending…" : "Send Survey"}
+        {sending ? "Sending…" : `Send ${surveyType === "completion" ? "Completion" : surveyType === "worker_feedback" ? "Worker" : "Midway"} Survey`}
       </button>
     </div>
   );
@@ -1579,11 +1631,7 @@ function TendersTab({ prefillTask, onClear }) {
   const [complaints, setComplaints] = useState([]);
 
   useEffect(() => {
-    fetchComplaintQueue({ limit:50 }).then(d => {
-      // Show complaints that have a workflow or are active
-      const active = (d.items||[]).filter(c => !['resolved','closed','rejected'].includes(c.status));
-      setComplaints(active);
-    });
+    fetchComplaintQueue({ status:"in_progress", limit:30 }).then(d => setComplaints(d.items||[]));
     if (prefillTask) {
       setForm(f => ({...f, complaint_id: prefillTask.complaint_id||"", title:`Tender for: ${prefillTask.title}`, workflow_step_instance_id:prefillTask.workflow_step_instance_id}));
     }
@@ -1853,4 +1901,4 @@ export default function OfficialDashboardPage() {
       <CRMAgentChat />
     </AppLayout>
   );
-} 
+}
