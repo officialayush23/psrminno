@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+import nomic
 from nomic import embed
 from PIL import Image
 
@@ -12,9 +13,23 @@ TEXT_MODEL = "nomic-embed-text-v1.5"
 IMAGE_MODEL = "nomic-embed-vision-v1.5"
 EMBEDDING_DIMENSIONALITY = 768
 
+_nomic_initialized = False
+
 
 def _ensure_nomic_api_key() -> None:
-    os.environ["NOMIC_API_KEY"] = settings.NOMIC_API_KEY
+    global _nomic_initialized
+    if _nomic_initialized:
+        return
+    api_key = settings.NOMIC_API_KEY
+    if not api_key:
+        raise ValueError("NOMIC_API_KEY is not configured")
+    # Set env var AND call nomic.login() — library requires both
+    os.environ["NOMIC_API_KEY"] = api_key
+    try:
+        nomic.login(token=api_key)
+    except Exception:
+        pass  # login() may fail if already initialized — env var is enough
+    _nomic_initialized = True
 
 
 def _extract_first_embedding(result: Dict[str, Any]) -> List[float]:

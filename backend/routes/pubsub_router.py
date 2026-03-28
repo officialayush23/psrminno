@@ -20,20 +20,26 @@ router = APIRouter(prefix="/pubsub", tags=["PubSub"])
 
 def _verify_pubsub_request(request: Request) -> None:
     """
-    Allow either:
-    - GCP push-style request marker header (X-Goog-Resource-State), or
-    - Bearer token matching PUBSUB_PUSH_SECRET when configured.
+    Verify Pub/Sub push requests. Accepts:
+    1. ?token=<secret> query param  (our subscription push URL uses this)
+    2. Authorization: Bearer <secret> header
+    3. No secret configured → allow all (dev/test)
+    Strips whitespace from secret to handle gcloud trailing-newline bug.
     """
-    if not settings.PUBSUB_PUSH_SECRET:
+    stored = (settings.PUBSUB_PUSH_SECRET or "").strip()
+    if not stored:
+        return  # no secret configured — open (dev mode)
+
+    # Primary: ?token= query param
+    token = request.query_params.get("token", "").strip()
+    if token and token == stored:
         return
 
-    if request.headers.get("x-goog-resource-state"):
-        return
-
+    # Fallback: Authorization: Bearer header
     auth_header = request.headers.get("authorization", "")
     if auth_header.lower().startswith("bearer "):
-        token = auth_header.split(" ", 1)[1].strip()
-        if token == settings.PUBSUB_PUSH_SECRET:
+        bearer = auth_header.split(" ", 1)[1].strip()
+        if bearer == stored:
             return
 
     raise HTTPException(status_code=401, detail="Unauthorized Pub/Sub push request")
