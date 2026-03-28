@@ -2248,11 +2248,9 @@ def create_user(
     if body.role not in VALID_ROLES:
         raise HTTPException(400, f"role must be one of: {VALID_ROLES}")
 
-    existing = db.execute(text("SELECT id FROM users WHERE email=:email"), {"email": body.email.lower().strip()}).first()
-    if existing:
-        raise HTTPException(409, "Email already exists in DB")
-
     import firebase_admin.auth as fb_auth
+
+    # ── Get or create Firebase user ───────────────────────────────
     try:
         fb_user = fb_auth.create_user(
             email=body.email.lower().strip(),
@@ -2272,42 +2270,89 @@ def create_user(
     if not city_id:
         city_id = str(db.execute(text("SELECT id FROM cities LIMIT 1")).scalar())
 
-    new_user_id = str(_uuid.uuid4())
-    db.execute(
-        text("""
-            INSERT INTO users (
-                id, auth_uid, auth_provider, email, phone, full_name,
-                role, preferred_language, city_id, department_id, jurisdiction_id,
-                is_active, is_verified, twilio_opt_in, email_opt_in, metadata
-            ) VALUES (
-                CAST(:id AS uuid), :auth_uid, 'password',
-                :email, :phone, :full_name,
-                :role, :lang,
-                CAST(:city AS uuid), CAST(:dept AS uuid), CAST(:jur AS uuid),
-                TRUE, FALSE, TRUE, TRUE, '{}'::jsonb
-            )
-        """),
-        {
-            "id": new_user_id, "auth_uid": firebase_uid,
-            "email": body.email.lower().strip(), "phone": body.phone or None,
-            "full_name": body.full_name, "role": body.role, "lang": body.preferred_language,
-            "city": city_id, "dept": body.department_id or None, "jur": body.jurisdiction_id or None,
-        },
-    )
+    # ── Check if user already exists in DB (could be a citizen who signed up) ─
+    existing = db.execute(
+        text("SELECT id, role FROM users WHERE email=:email OR auth_uid=:uid"),
+        {"email": body.email.lower().strip(), "uid": firebase_uid},
+    ).mappings().first()
 
+    if existing:
+        # User exists — update their role + department instead of creating new row
+        existing_id = str(existing["id"])
+        db.execute(
+            text("""
+                UPDATE users SET
+                    role            = :role,
+                    full_name       = :full_name,
+                    phone           = COALESCE(:phone, phone),
+                    department_id   = CAST(:dept AS uuid),
+                    jurisdiction_id = CAST(:jur AS uuid),
+                    auth_uid        = :auth_uid,
+                    is_active       = TRUE,
+                    is_verified     = TRUE,
+                    email_opt_in    = TRUE,
+                    updated_at      = NOW()
+                WHERE id = CAST(:id AS uuid)
+            """),
+            {
+                "id": existing_id, "role": body.role,
+                "full_name": body.full_name, "phone": body.phone or None,
+                "dept": body.department_id or None, "jur": body.jurisdiction_id or None,
+                "auth_uid": firebase_uid,
+            },
+        )
+        user_id_to_use = existing_id
+        logger.info("Promoted existing user %s (%s) to role=%s", existing_id, body.email, body.role)
+    else:
+        # Create new DB user
+        user_id_to_use = str(_uuid.uuid4())
+        db.execute(
+            text("""
+                INSERT INTO users (
+                    id, auth_uid, auth_provider, email, phone, full_name,
+                    role, preferred_language, city_id, department_id, jurisdiction_id,
+                    is_active, is_verified, twilio_opt_in, email_opt_in, metadata
+                ) VALUES (
+                    CAST(:id AS uuid), :auth_uid, 'password',
+                    :email, :phone, :full_name,
+                    :role, :lang,
+                    CAST(:city AS uuid), CAST(:dept AS uuid), CAST(:jur AS uuid),
+                    TRUE, TRUE, TRUE, TRUE, '{}'::jsonb
+                )
+            """),
+            {
+                "id": user_id_to_use, "auth_uid": firebase_uid,
+                "email": body.email.lower().strip(), "phone": body.phone or None,
+                "full_name": body.full_name, "role": body.role, "lang": body.preferred_language,
+                "city": city_id, "dept": body.department_id or None, "jur": body.jurisdiction_id or None,
+            },
+        )
+
+    # ── Create worker/contractor row if needed ─────────────────────
     if body.role == "worker":
         db.execute(
-            text("INSERT INTO workers (user_id, department_id, skills, is_available) VALUES (CAST(:uid AS uuid), CAST(:dept AS uuid), '{}'::text[], TRUE)"),
-            {"uid": new_user_id, "dept": body.department_id or None},
+            text("""
+                INSERT INTO workers (user_id, department_id, skills, is_available, current_task_count)
+                VALUES (CAST(:uid AS uuid), CAST(:dept AS uuid), '{}'::text[], TRUE, 0)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    department_id = CAST(:dept AS uuid),
+                    is_available  = TRUE
+            """),
+            {"uid": user_id_to_use, "dept": body.department_id or None},
         )
     elif body.role == "contractor":
         db.execute(
             text("""
                 INSERT INTO contractors (user_id, city_id, company_name, registration_number, registered_dept_ids)
                 VALUES (CAST(:uid AS uuid), CAST(:city AS uuid), :name, :reg, '{}'::uuid[])
+                ON CONFLICT (user_id) DO UPDATE SET
+                    company_name = :name
             """),
-            {"uid": new_user_id, "city": city_id,
-             "name": body.full_name + " Contractors", "reg": "PENDING-" + new_user_id[-8:].upper()},
+            {
+                "uid": user_id_to_use, "city": city_id,
+                "name": body.full_name + " Contractors",
+                "reg": "PENDING-" + user_id_to_use[-8:].upper(),
+            },
         )
 
     db.commit()
@@ -2319,10 +2364,10 @@ def create_user(
         pass
 
     return {
-        "user_id": new_user_id, "firebase_uid": firebase_uid,
+        "user_id": user_id_to_use, "firebase_uid": firebase_uid,
         "email": body.email.lower().strip(), "role": body.role,
         "temp_password": body.temp_password, "reset_link": reset_link,
-        "message": f"User created. Temp password: '{body.temp_password}'",
+        "message": f"User {'promoted' if existing else 'created'}. Temp password: '{body.temp_password}'",
     }
 
 
@@ -2344,9 +2389,37 @@ def update_user(
     if body.is_active is not None:      sets.append("is_active=:is_active");                params["is_active"] = body.is_active
 
     db.execute(text(f"UPDATE users SET {', '.join(sets)} WHERE id=CAST(:uid AS uuid)"), params)
-    if body.department_id:
-        db.execute(text("UPDATE workers SET department_id=CAST(:dept AS uuid) WHERE user_id=CAST(:uid AS uuid)"),
-                   {"dept": body.department_id, "uid": str(user_id)})
+
+    # ── Role-specific table sync ──────────────────────────────────
+    if body.role == "worker":
+        # Ensure workers row exists — create if missing, update dept if changed
+        dept = body.department_id or db.execute(
+            text("SELECT department_id FROM users WHERE id=CAST(:uid AS uuid)"), {"uid": str(user_id)}
+        ).scalar()
+        db.execute(
+            text("""
+                INSERT INTO workers (user_id, department_id, skills, is_available, current_task_count)
+                VALUES (CAST(:uid AS uuid), CAST(:dept AS uuid), '{}'::text[], TRUE, 0)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    department_id = CAST(:dept AS uuid),
+                    is_available  = TRUE
+            """),
+            {"uid": str(user_id), "dept": dept},
+        )
+    elif body.role in ("official", "admin", "super_admin"):
+        # Officials don't need a workers row — but update dept on workers if they had one
+        if body.department_id:
+            db.execute(
+                text("UPDATE workers SET department_id=CAST(:dept AS uuid) WHERE user_id=CAST(:uid AS uuid)"),
+                {"dept": body.department_id, "uid": str(user_id)},
+            )
+    elif body.department_id:
+        # Generic dept update for other roles
+        db.execute(
+            text("UPDATE workers SET department_id=CAST(:dept AS uuid) WHERE user_id=CAST(:uid AS uuid)"),
+            {"dept": body.department_id, "uid": str(user_id)},
+        )
+
     db.commit()
     return {"status": "updated", "user_id": str(user_id)}
 
@@ -2706,7 +2779,7 @@ def assign_workflow_workers(
                 UPDATE tasks t
                 SET assigned_worker_id     = CAST(:w AS uuid),
                     assigned_contractor_id = CAST(:c AS uuid),
-                    status     = CASE WHEN t.status = 'pending' THEN 'accepted' ELSE t.status END,
+                    status     = CASE WHEN status = 'pending' THEN 'accepted' ELSE status END,
                     override_by = CAST(:by AS uuid),
                     updated_at  = NOW()
                 FROM workflow_step_instances wsi
