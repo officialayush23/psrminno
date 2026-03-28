@@ -77,7 +77,7 @@ function Field({ label, value, onChange, placeholder, type = "text" }) {
 
 // ── Create / Edit User Drawer ─────────────────────────────────────
 
-function UserDrawer({ open, onClose, editUser, departments, onSuccess }) {
+function UserDrawer({ open, onClose, editUser, departments, jurisdictions = [], onSuccess }) {
   const isEdit = Boolean(editUser);
   const [form, setForm] = useState({
     email:              "",
@@ -97,8 +97,8 @@ function UserDrawer({ open, onClose, editUser, departments, onSuccess }) {
         email:           editUser.email || "",
         full_name:       editUser.full_name || "",
         role:            editUser.role || "official",
-        department_id:   editUser.department_id || "",
-        jurisdiction_id: editUser.jurisdiction_id || "",
+        department_id:   editUser.department_id ? String(editUser.department_id) : "",
+        jurisdiction_id: editUser.jurisdiction_id ? String(editUser.jurisdiction_id) : "",
         phone:           editUser.phone || "",
         preferred_language: editUser.preferred_language || "hi",
         temp_password:   "PSCrm@2025",
@@ -225,6 +225,21 @@ function UserDrawer({ open, onClose, editUser, departments, onSuccess }) {
             </div>
           )}
 
+          {/* Jurisdiction */}
+          {jurisdictions.length > 0 && ["official"].includes(form.role) && (
+            <div>
+              <label className="text-xs font-bold uppercase tracking-wider block mb-2"
+                style={{ color: "#475569" }}>Jurisdiction (optional)</label>
+              <select value={form.jurisdiction_id} onChange={e => set("jurisdiction_id", e.target.value)}
+                className="ginput w-full px-3 py-2.5 rounded-xl text-sm">
+                <option value="">All jurisdictions</option>
+                {jurisdictions.map(j => (
+                  <option key={j.id} value={j.id}>{j.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Language */}
           <div>
             <label className="text-xs font-bold uppercase tracking-wider block mb-2"
@@ -323,6 +338,7 @@ export default function UserManagementPage() {
 
   const [users,       setUsers]       = useState([]);
   const [departments, setDepartments] = useState([]);
+  const [jurisdictions, setJurisdictions] = useState([]);
   const [loading,     setLoading]     = useState(true);
   const [roleFilter,  setRoleFilter]  = useState("");
   const [search,      setSearch]      = useState("");
@@ -336,9 +352,10 @@ export default function UserManagementPage() {
     try {
       const params = {};
       if (roleFilter) params.role = roleFilter;
-      const [u, d] = await Promise.all([fetchStaffUsers(params), fetchDepartments()]);
+      const [u, d, j] = await Promise.all([fetchStaffUsers(params), fetchDepartments(), fetchJurisdictions()]);
       setUsers(u || []);
       setDepartments(d || []);
+      setJurisdictions(j || []);
     } catch { toast.error("Failed to load users"); }
     finally { setLoading(false); }
   }, [roleFilter]);
@@ -511,9 +528,10 @@ export default function UserManagementPage() {
 
       <UserDrawer
         open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
+        onClose={() => { setDrawerOpen(false); setEditUser(null); }}
         editUser={editUser}
         departments={departments}
+        jurisdictions={jurisdictions}
         onSuccess={load}
       />
       <ConfirmModal
